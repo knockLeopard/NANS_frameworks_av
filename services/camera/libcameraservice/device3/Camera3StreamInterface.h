@@ -26,6 +26,20 @@ namespace android {
 
 namespace camera3 {
 
+enum {
+    /**
+     * This stream set ID indicates that the set ID is invalid, and this stream doesn't intend to
+     * share buffers with any other stream. It is illegal to register this kind of stream to
+     * Camera3BufferManager.
+     */
+    CAMERA3_STREAM_SET_ID_INVALID = -1,
+
+    /**
+     * Invalid output stream ID.
+     */
+    CAMERA3_STREAM_ID_INVALID = -1,
+};
+
 class StatusTracker;
 
 /**
@@ -34,10 +48,20 @@ class StatusTracker;
  */
 class Camera3StreamInterface : public virtual RefBase {
   public:
+
+    enum {
+        ALLOCATE_PIPELINE_MAX = 0, // Allocate max buffers used by a given surface
+    };
+
     /**
      * Get the stream's ID
      */
     virtual int      getId() const = 0;
+
+    /**
+     * Get the output stream set id.
+     */
+    virtual int      getStreamSetId() const = 0;
 
     /**
      * Get the stream's dimensions and format
@@ -45,6 +69,7 @@ class Camera3StreamInterface : public virtual RefBase {
     virtual uint32_t getWidth() const = 0;
     virtual uint32_t getHeight() const = 0;
     virtual int      getFormat() const = 0;
+    virtual android_dataspace getDataSpace() const = 0;
 
     /**
      * Start the stream configuration process. Returns a handle to the stream's
@@ -89,6 +114,84 @@ class Camera3StreamInterface : public virtual RefBase {
     virtual status_t cancelConfiguration() = 0;
 
     /**
+     * Determine whether the stream has already become in-use (has received
+     * a valid filled buffer), which determines if a stream can still have
+     * prepareNextBuffer called on it.
+     */
+    virtual bool     isUnpreparable() = 0;
+
+    /**
+     * Start stream preparation. May only be called in the CONFIGURED state,
+     * when no valid buffers have yet been returned to this stream. Prepares
+     * up to maxCount buffers, or the maximum number of buffers needed by the
+     * pipeline if maxCount is ALLOCATE_PIPELINE_MAX.
+     *
+     * If no prepartion is necessary, returns OK and does not transition to
+     * PREPARING state. Otherwise, returns NOT_ENOUGH_DATA and transitions
+     * to PREPARING.
+     *
+     * Returns:
+     *    OK if no more buffers need to be preallocated
+     *    NOT_ENOUGH_DATA if calls to prepareNextBuffer are needed to finish
+     *        buffer pre-allocation, and transitions to the PREPARING state.
+     *    NO_INIT in case of a serious error from the HAL device
+     *    INVALID_OPERATION if called when not in CONFIGURED state, or a
+     *        valid buffer has already been returned to this stream.
+     */
+    virtual status_t startPrepare(int maxCount) = 0;
+
+    /**
+     * Check if the stream is mid-preparing.
+     */
+    virtual bool     isPreparing() const = 0;
+
+    /**
+     * Continue stream buffer preparation by allocating the next
+     * buffer for this stream.  May only be called in the PREPARED state.
+     *
+     * Returns OK and transitions to the CONFIGURED state if all buffers
+     * are allocated after the call concludes. Otherwise returns NOT_ENOUGH_DATA.
+     *
+     * Returns:
+     *    OK if no more buffers need to be preallocated, and transitions
+     *        to the CONFIGURED state.
+     *    NOT_ENOUGH_DATA if more calls to prepareNextBuffer are needed to finish
+     *        buffer pre-allocation.
+     *    NO_INIT in case of a serious error from the HAL device
+     *    INVALID_OPERATION if called when not in CONFIGURED state, or a
+     *        valid buffer has already been returned to this stream.
+     */
+    virtual status_t prepareNextBuffer() = 0;
+
+    /**
+     * Cancel stream preparation early. In case allocation needs to be
+     * stopped, this method transitions the stream back to the CONFIGURED state.
+     * Buffers that have been allocated with prepareNextBuffer remain that way,
+     * but a later use of prepareNextBuffer will require just as many
+     * calls as if the earlier prepare attempt had not existed.
+     *
+     * Returns:
+     *    OK if cancellation succeeded, and transitions to the CONFIGURED state
+     *    INVALID_OPERATION if not in the PREPARING state
+     *    NO_INIT in case of a serious error from the HAL device
+     */
+    virtual status_t cancelPrepare() = 0;
+
+    /**
+     * Tear down memory for this stream. This frees all unused gralloc buffers
+     * allocated for this stream, but leaves it ready for operation afterward.
+     *
+     * May only be called in the CONFIGURED state, and keeps the stream in
+     * the CONFIGURED state.
+     *
+     * Returns:
+     *    OK if teardown succeeded.
+     *    INVALID_OPERATION if not in the CONFIGURED state
+     *    NO_INIT in case of a serious error from the HAL device
+     */
+    virtual status_t tearDown() = 0;
+
+    /**
      * Fill in the camera3_stream_buffer with the next valid buffer for this
      * stream, to hand over to the HAL.
      *
@@ -128,6 +231,13 @@ class Camera3StreamInterface : public virtual RefBase {
     virtual status_t returnInputBuffer(const camera3_stream_buffer &buffer) = 0;
 
     /**
+     * Get the buffer producer of the input buffer queue.
+     *
+     * This method only applies to input streams.
+     */
+    virtual status_t getInputBufferProducer(sp<IGraphicBufferProducer> *producer) = 0;
+
+    /**
      * Whether any of the stream's buffers are currently in use by the HAL,
      * including buffers that have been returned but not yet had their
      * release fence signaled.
@@ -150,6 +260,11 @@ class Camera3StreamInterface : public virtual RefBase {
      * buffers.
      */
     virtual status_t disconnect() = 0;
+
+    /**
+     * Return if the buffer queue of the stream is abandoned.
+     */
+    virtual bool isAbandoned() const = 0;
 
     /**
      * Debug dump of the stream's state.

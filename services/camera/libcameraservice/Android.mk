@@ -20,11 +20,14 @@ LOCAL_PATH:= $(call my-dir)
 
 include $(CLEAR_VARS)
 
-LOCAL_SRC_FILES:=               \
+# Camera service source
+
+LOCAL_SRC_FILES :=  \
     CameraService.cpp \
-    CameraDeviceFactory.cpp \
+    CameraFlashlight.cpp \
     common/Camera2ClientBase.cpp \
     common/CameraDeviceBase.cpp \
+    common/CameraModule.cpp \
     common/FrameProcessorBase.cpp \
     api1/CameraClient.cpp \
     api1/Camera2Client.cpp \
@@ -33,15 +36,10 @@ LOCAL_SRC_FILES:=               \
     api1/client2/StreamingProcessor.cpp \
     api1/client2/JpegProcessor.cpp \
     api1/client2/CallbackProcessor.cpp \
-    api1/client2/ZslProcessor.cpp \
-    api1/client2/ZslProcessorInterface.cpp \
-    api1/client2/BurstCapture.cpp \
     api1/client2/JpegCompressor.cpp \
     api1/client2/CaptureSequencer.cpp \
-    api1/client2/ZslProcessor3.cpp \
+    api1/client2/ZslProcessor.cpp \
     api2/CameraDeviceClient.cpp \
-    api_pro/ProCamera2Client.cpp \
-    device2/Camera2Device.cpp \
     device3/Camera3Device.cpp \
     device3/Camera3Stream.cpp \
     device3/Camera3IOStreamBase.cpp \
@@ -50,8 +48,11 @@ LOCAL_SRC_FILES:=               \
     device3/Camera3ZslStream.cpp \
     device3/Camera3DummyStream.cpp \
     device3/StatusTracker.cpp \
+    device3/Camera3BufferManager.cpp \
     gui/RingBufferConsumer.cpp \
     utils/CameraTraces.cpp \
+    utils/AutoConditionLock.cpp \
+    utils/TagMonitor.cpp
 
 LOCAL_SHARED_LIBRARIES:= \
     libui \
@@ -60,20 +61,24 @@ LOCAL_SHARED_LIBRARIES:= \
     libbinder \
     libcutils \
     libmedia \
+    libmediautils \
     libcamera_client \
     libgui \
     libhardware \
     libsync \
     libcamera_metadata \
-    libjpeg
+    libjpeg \
+    libmemunreachable
 
 LOCAL_C_INCLUDES += \
-    system/media/camera/include \
     system/media/private/camera/include \
+    frameworks/native/include/media/openmax \
     external/jpeg
 
+LOCAL_EXPORT_C_INCLUDE_DIRS := \
+    frameworks/av/services/camera/libcameraservice
 
-LOCAL_CFLAGS += -Wall -Wextra
+LOCAL_CFLAGS += -Wall -Wextra -Werror
 
 LOCAL_MODULE:= libcameraservice
 

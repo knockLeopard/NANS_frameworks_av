@@ -29,8 +29,11 @@
 #include <media/stagefright/foundation/AMessage.h>
 #include <media/stagefright/MediaSource.h>
 #include <media/stagefright/MetaData.h>
+#include <media/stagefright/Utils.h>
 
 namespace android {
+
+const int32_t kNumListenerQueuePackets = 80;
 
 NuPlayer::StreamingSource::StreamingSource(
         const sp<AMessage> &notify,
@@ -63,7 +66,7 @@ void NuPlayer::StreamingSource::prepareAsync() {
 }
 
 void NuPlayer::StreamingSource::start() {
-    mStreamListener = new NuPlayerStreamListener(mSource, 0);
+    mStreamListener = new NuPlayerStreamListener(mSource, NULL);
 
     uint32_t sourceFlags = mSource->flags();
 
@@ -84,7 +87,7 @@ status_t NuPlayer::StreamingSource::feedMoreTSData() {
 }
 
 void NuPlayer::StreamingSource::onReadBuffer() {
-    for (int32_t i = 0; i < 50; ++i) {
+    for (int32_t i = 0; i < kNumListenerQueuePackets; ++i) {
         char buffer[188];
         sp<AMessage> extra;
         ssize_t n = mStreamListener->read(buffer, sizeof(buffer), &extra);
@@ -163,7 +166,7 @@ status_t NuPlayer::StreamingSource::postReadBuffer() {
         mBuffering = true;
     }
 
-    (new AMessage(kWhatReadBuffer, id()))->post();
+    (new AMessage(kWhatReadBuffer, this))->post();
     return OK;
 }
 
@@ -215,14 +218,22 @@ sp<AnotherPacketSource> NuPlayer::StreamingSource::getSource(bool audio) {
     return static_cast<AnotherPacketSource *>(source.get());
 }
 
-sp<MetaData> NuPlayer::StreamingSource::getFormatMeta(bool audio) {
+sp<AMessage> NuPlayer::StreamingSource::getFormat(bool audio) {
     sp<AnotherPacketSource> source = getSource(audio);
 
+    sp<AMessage> format = new AMessage;
     if (source == NULL) {
-        return NULL;
+        format->setInt32("err", -EWOULDBLOCK);
+        return format;
     }
 
-    return source->getFormat();
+    sp<MetaData> meta = source->getFormat();
+    status_t err = convertMetaDataToMessage(meta, &format);
+    if (err != OK) { // format may have been cleared on error
+        format = new AMessage;
+        format->setInt32("err", err);
+    }
+    return format;
 }
 
 status_t NuPlayer::StreamingSource::dequeueAccessUnit(

@@ -31,7 +31,10 @@ namespace clearkeydrm {
 
 class CryptoPlugin : public android::CryptoPlugin {
 public:
-    CryptoPlugin(const android::sp<Session>& session) : mSession(session) {}
+    CryptoPlugin(const android::Vector<uint8_t>& sessionId) {
+        mInitStatus = setMediaDrmSession(sessionId);
+    }
+
     virtual ~CryptoPlugin() {}
 
     virtual bool requiresSecureDecoderComponent(const char* mime) const {
@@ -41,14 +44,20 @@ public:
 
     virtual ssize_t decrypt(
             bool secure, const KeyId keyId, const Iv iv,
-            Mode mode, const void* srcPtr,
+            Mode mode, const Pattern &pattern, const void* srcPtr,
             const SubSample* subSamples, size_t numSubSamples,
             void* dstPtr, android::AString* errorDetailMsg);
+
+    virtual android::status_t setMediaDrmSession(
+            const android::Vector<uint8_t>& sessionId);
+
+    android::status_t getInitStatus() const {return mInitStatus;}
 
 private:
     DISALLOW_EVIL_CONSTRUCTORS(CryptoPlugin);
 
     android::sp<Session> mSession;
+    android::status_t mInitStatus;
 };
 
 } // namespace clearkeydrm

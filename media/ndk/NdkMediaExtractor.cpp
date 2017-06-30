@@ -23,6 +23,7 @@
 #include "NdkMediaFormatPriv.h"
 
 
+#include <inttypes.h>
 #include <utils/Log.h>
 #include <utils/StrongPointer.h>
 #include <media/hardware/CryptoAPI.h>
@@ -70,8 +71,9 @@ media_status_t AMediaExtractor_delete(AMediaExtractor *mData) {
 }
 
 EXPORT
-media_status_t AMediaExtractor_setDataSourceFd(AMediaExtractor *mData, int fd, off64_t offset, off64_t length) {
-    ALOGV("setDataSource(%d, %lld, %lld)", fd, offset, length);
+media_status_t AMediaExtractor_setDataSourceFd(AMediaExtractor *mData, int fd, off64_t offset,
+        off64_t length) {
+    ALOGV("setDataSource(%d, %" PRId64 ", %" PRId64 ")", fd, offset, length);
     return translate_error(mData->mImpl->setDataSource(fd, offset, length));
 }
 
@@ -146,7 +148,14 @@ media_status_t AMediaExtractor_unselectTrack(AMediaExtractor *mData, size_t idx)
 EXPORT
 bool AMediaExtractor_advance(AMediaExtractor *mData) {
     //ALOGV("advance");
-    return mData->mImpl->advance();
+    status_t err = mData->mImpl->advance();
+    if (err == ERROR_END_OF_STREAM) {
+        return false;
+    } else if (err != OK) {
+        ALOGE("sf error code: %d", err);
+        return false;
+    }
+    return true;
 }
 
 EXPORT
@@ -242,15 +251,27 @@ PsshInfo* AMediaExtractor_getPsshInfo(AMediaExtractor *ex) {
     while (len > 0) {
         numentries++;
 
+        if (len < 16) {
+            ALOGE("invalid PSSH data");
+            return NULL;
+        }
         // skip uuid
         data += 16;
         len -= 16;
 
         // get data length
+        if (len < 4) {
+            ALOGE("invalid PSSH data");
+            return NULL;
+        }
         uint32_t datalen = *((uint32_t*)data);
         data += 4;
         len -= 4;
 
+        if (len < datalen) {
+            ALOGE("invalid PSSH data");
+            return NULL;
+        }
         // skip the data
         data += datalen;
         len -= datalen;
@@ -264,6 +285,10 @@ PsshInfo* AMediaExtractor_getPsshInfo(AMediaExtractor *ex) {
     // extra pointer for each entry, and an extra size_t for the entire PsshInfo.
     size_t newsize = buffer->size() - (sizeof(uint32_t) * numentries) + sizeof(size_t)
             + ((sizeof(void*) + sizeof(size_t)) * numentries);
+    if (newsize <= buffer->size()) {
+        ALOGE("invalid PSSH data");
+        return NULL;
+    }
     ex->mPsshBuf = new ABuffer(newsize);
     ex->mPsshBuf->setRange(0, newsize);
 
@@ -325,9 +350,9 @@ AMediaCodecCryptoInfo *AMediaExtractor_getSampleCryptoInfo(AMediaExtractor *ex) 
 
     const void *key;
     size_t keysize;
-    if (meta->findData(kKeyCryptoIV, &type, &key, &keysize)) {
+    if (meta->findData(kKeyCryptoKey, &type, &key, &keysize)) {
         if (keysize != 16) {
-            // IVs must be 16 bytes in length.
+            // Keys must be 16 bytes in length.
             return NULL;
         }
     }

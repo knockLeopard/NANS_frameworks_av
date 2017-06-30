@@ -237,7 +237,9 @@ static Word16 Chebps (Word16 x,
 
 ------------------------------------------------------------------------------
 */
-
+#ifdef __clang__
+__attribute__((no_sanitize("integer")))
+#endif
 static Word16 Chebps(Word16 x,
                      Word16 f[], /* (n) */
                      Word16 n,
@@ -564,10 +566,10 @@ void Az_lsp(
     Flag   *pOverflow   /* (i/o): overflow flag                              */
 )
 {
-    register Word16 i;
-    register Word16 j;
-    register Word16 nf;
-    register Word16 ip;
+    Word16 i;
+    Word16 j;
+    Word16 nf;
+    Word16 ip;
     Word16 xlow;
     Word16 ylow;
     Word16 xhigh;

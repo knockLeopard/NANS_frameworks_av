@@ -28,8 +28,7 @@
 namespace android {
 
 struct ABuffer;
-struct MetaData;
-struct MediaBuffer;
+class MediaBuffer;
 
 struct NuPlayer::Source : public AHandler {
     enum Flags {
@@ -47,13 +46,12 @@ struct NuPlayer::Source : public AHandler {
         kWhatFlagsChanged,
         kWhatVideoSizeChanged,
         kWhatBufferingUpdate,
-        kWhatBufferingStart,
-        kWhatBufferingEnd,
         kWhatPauseOnBufferingStart,
         kWhatResumeOnBufferingEnd,
         kWhatCacheStats,
         kWhatSubtitleData,
         kWhatTimedTextData,
+        kWhatTimedMetaData,
         kWhatQueueDecoderShutdown,
         kWhatDrmNoLicense,
         kWhatInstantiateSecureDecoders,
@@ -117,6 +115,12 @@ struct NuPlayer::Source : public AHandler {
     virtual bool isRealTime() const {
         return false;
     }
+
+    virtual bool isStreaming() const {
+        return true;
+    }
+
+    virtual void setOffloadAudio(bool /* offload */) {}
 
 protected:
     virtual ~Source() {}

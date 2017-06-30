@@ -32,23 +32,13 @@ namespace android {
 
 // client singleton for AudioFlinger binder interface
 Mutex AudioSystem::gLock;
-Mutex AudioSystem::gLockCache;
 Mutex AudioSystem::gLockAPS;
-Mutex AudioSystem::gLockAPC;
 sp<IAudioFlinger> AudioSystem::gAudioFlinger;
 sp<AudioSystem::AudioFlingerClient> AudioSystem::gAudioFlingerClient;
 audio_error_callback AudioSystem::gAudioErrorCallback = NULL;
+dynamic_policy_callback AudioSystem::gDynPolicyCallback = NULL;
+record_config_callback  AudioSystem::gRecordConfigCallback = NULL;
 
-// Cached values for output handles
-DefaultKeyedVector<audio_io_handle_t, AudioSystem::OutputDescriptor *> AudioSystem::gOutputs(NULL);
-
-// Cached values for recording queries, all protected by gLock
-uint32_t AudioSystem::gPrevInSamplingRate;
-audio_format_t AudioSystem::gPrevInFormat;
-audio_channel_mask_t AudioSystem::gPrevInChannelMask;
-size_t AudioSystem::gInBuffSize = 0;    // zero indicates cache is invalid
-
-sp<AudioSystem::AudioPortCallback> AudioSystem::gAudioPortCallback;
 
 // establish binder interface to AudioFlinger service
 const sp<IAudioFlinger> AudioSystem::get_audio_flinger()
@@ -87,6 +77,25 @@ const sp<IAudioFlinger> AudioSystem::get_audio_flinger()
     return af;
 }
 
+const sp<AudioSystem::AudioFlingerClient> AudioSystem::getAudioFlingerClient()
+{
+    // calling get_audio_flinger() will initialize gAudioFlingerClient if needed
+    const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
+    if (af == 0) return 0;
+    Mutex::Autolock _l(gLock);
+    return gAudioFlingerClient;
+}
+
+sp<AudioIoDescriptor> AudioSystem::getIoDescriptor(audio_io_handle_t ioHandle)
+{
+    sp<AudioIoDescriptor> desc;
+    const sp<AudioFlingerClient> afc = getAudioFlingerClient();
+    if (afc != 0) {
+        desc = afc->getIoDescriptor(ioHandle);
+    }
+    return desc;
+}
+
 /* static */ status_t AudioSystem::checkAudioFlinger()
 {
     if (defaultServiceManager()->checkService(String16("media.audio_flinger")) != 0) {
@@ -94,6 +103,8 @@ const sp<IAudioFlinger> AudioSystem::get_audio_flinger()
     }
     return DEAD_OBJECT;
 }
+
+// FIXME Declare in binder opcode order, similarly to IAudioFlinger.h and IAudioFlinger.cpp
 
 status_t AudioSystem::muteMicrophone(bool state)
 {
@@ -255,30 +266,23 @@ status_t AudioSystem::getOutputSamplingRate(uint32_t* samplingRate, audio_stream
     return getSamplingRate(output, samplingRate);
 }
 
-status_t AudioSystem::getSamplingRate(audio_io_handle_t output,
+status_t AudioSystem::getSamplingRate(audio_io_handle_t ioHandle,
                                       uint32_t* samplingRate)
 {
     const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
     if (af == 0) return PERMISSION_DENIED;
-
-    Mutex::Autolock _l(gLockCache);
-
-    OutputDescriptor *outputDesc = AudioSystem::gOutputs.valueFor(output);
-    if (outputDesc == NULL) {
-        ALOGV("getOutputSamplingRate() no output descriptor for output %d in gOutputs", output);
-        gLockCache.unlock();
-        *samplingRate = af->sampleRate(output);
-        gLockCache.lock();
+    sp<AudioIoDescriptor> desc = getIoDescriptor(ioHandle);
+    if (desc == 0) {
+        *samplingRate = af->sampleRate(ioHandle);
     } else {
-        ALOGV("getOutputSamplingRate() reading from output desc");
-        *samplingRate = outputDesc->samplingRate;
+        *samplingRate = desc->mSamplingRate;
     }
     if (*samplingRate == 0) {
-        ALOGE("AudioSystem::getSamplingRate failed for output %d", output);
+        ALOGE("AudioSystem::getSamplingRate failed for ioHandle %d", ioHandle);
         return BAD_VALUE;
     }
 
-    ALOGV("getSamplingRate() output %d, sampling rate %u", output, *samplingRate);
+    ALOGV("getSamplingRate() ioHandle %d, sampling rate %u", ioHandle, *samplingRate);
 
     return NO_ERROR;
 }
@@ -299,28 +303,23 @@ status_t AudioSystem::getOutputFrameCount(size_t* frameCount, audio_stream_type_
     return getFrameCount(output, frameCount);
 }
 
-status_t AudioSystem::getFrameCount(audio_io_handle_t output,
+status_t AudioSystem::getFrameCount(audio_io_handle_t ioHandle,
                                     size_t* frameCount)
 {
     const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
     if (af == 0) return PERMISSION_DENIED;
-
-    Mutex::Autolock _l(gLockCache);
-
-    OutputDescriptor *outputDesc = AudioSystem::gOutputs.valueFor(output);
-    if (outputDesc == NULL) {
-        gLockCache.unlock();
-        *frameCount = af->frameCount(output);
-        gLockCache.lock();
+    sp<AudioIoDescriptor> desc = getIoDescriptor(ioHandle);
+    if (desc == 0) {
+        *frameCount = af->frameCount(ioHandle);
     } else {
-        *frameCount = outputDesc->frameCount;
+        *frameCount = desc->mFrameCount;
     }
     if (*frameCount == 0) {
-        ALOGE("AudioSystem::getFrameCount failed for output %d", output);
+        ALOGE("AudioSystem::getFrameCount failed for ioHandle %d", ioHandle);
         return BAD_VALUE;
     }
 
-    ALOGV("getFrameCount() output %d, frameCount %zu", output, *frameCount);
+    ALOGV("getFrameCount() ioHandle %d, frameCount %zu", ioHandle, *frameCount);
 
     return NO_ERROR;
 }
@@ -346,16 +345,11 @@ status_t AudioSystem::getLatency(audio_io_handle_t output,
 {
     const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
     if (af == 0) return PERMISSION_DENIED;
-
-    Mutex::Autolock _l(gLockCache);
-
-    OutputDescriptor *outputDesc = AudioSystem::gOutputs.valueFor(output);
-    if (outputDesc == NULL) {
-        gLockCache.unlock();
+    sp<AudioIoDescriptor> outputDesc = getIoDescriptor(output);
+    if (outputDesc == 0) {
         *latency = af->latency(output);
-        gLockCache.lock();
     } else {
-        *latency = outputDesc->latency;
+        *latency = outputDesc->mLatency;
     }
 
     ALOGV("getLatency() output %d, latency %d", output, *latency);
@@ -366,34 +360,11 @@ status_t AudioSystem::getLatency(audio_io_handle_t output,
 status_t AudioSystem::getInputBufferSize(uint32_t sampleRate, audio_format_t format,
         audio_channel_mask_t channelMask, size_t* buffSize)
 {
-    const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
-    if (af == 0) {
-        return PERMISSION_DENIED;
+    const sp<AudioFlingerClient> afc = getAudioFlingerClient();
+    if (afc == 0) {
+        return NO_INIT;
     }
-    Mutex::Autolock _l(gLockCache);
-    // Do we have a stale gInBufferSize or are we requesting the input buffer size for new values
-    size_t inBuffSize = gInBuffSize;
-    if ((inBuffSize == 0) || (sampleRate != gPrevInSamplingRate) || (format != gPrevInFormat)
-        || (channelMask != gPrevInChannelMask)) {
-        gLockCache.unlock();
-        inBuffSize = af->getInputBufferSize(sampleRate, format, channelMask);
-        gLockCache.lock();
-        if (inBuffSize == 0) {
-            ALOGE("AudioSystem::getInputBufferSize failed sampleRate %d format %#x channelMask %x",
-                    sampleRate, format, channelMask);
-            return BAD_VALUE;
-        }
-        // A benign race is possible here: we could overwrite a fresher cache entry
-        // save the request params
-        gPrevInSamplingRate = sampleRate;
-        gPrevInFormat = format;
-        gPrevInChannelMask = channelMask;
-
-        gInBuffSize = inBuffSize;
-    }
-    *buffSize = inBuffSize;
-
-    return NO_ERROR;
+    return afc->getInputBufferSize(sampleRate, format, channelMask, buffSize);
 }
 
 status_t AudioSystem::setVoiceVolume(float value)
@@ -423,14 +394,14 @@ uint32_t AudioSystem::getInputFramesLost(audio_io_handle_t ioHandle)
     return result;
 }
 
-audio_unique_id_t AudioSystem::newAudioUniqueId()
+audio_unique_id_t AudioSystem::newAudioUniqueId(audio_unique_id_use_t use)
 {
     const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
     if (af == 0) return AUDIO_UNIQUE_ID_ALLOCATE;
-    return af->newAudioUniqueId();
+    return af->newAudioUniqueId(use);
 }
 
-void AudioSystem::acquireAudioSessionId(int audioSession, pid_t pid)
+void AudioSystem::acquireAudioSessionId(audio_session_t audioSession, pid_t pid)
 {
     const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
     if (af != 0) {
@@ -438,7 +409,7 @@ void AudioSystem::acquireAudioSessionId(int audioSession, pid_t pid)
     }
 }
 
-void AudioSystem::releaseAudioSessionId(int audioSession, pid_t pid)
+void AudioSystem::releaseAudioSessionId(audio_session_t audioSession, pid_t pid)
 {
     const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
     if (af != 0) {
@@ -453,7 +424,46 @@ audio_hw_sync_t AudioSystem::getAudioHwSyncForSession(audio_session_t sessionId)
     return af->getAudioHwSyncForSession(sessionId);
 }
 
+status_t AudioSystem::systemReady()
+{
+    const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
+    if (af == 0) return NO_INIT;
+    return af->systemReady();
+}
+
+status_t AudioSystem::getFrameCountHAL(audio_io_handle_t ioHandle,
+                                       size_t* frameCount)
+{
+    const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
+    if (af == 0) return PERMISSION_DENIED;
+    sp<AudioIoDescriptor> desc = getIoDescriptor(ioHandle);
+    if (desc == 0) {
+        *frameCount = af->frameCountHAL(ioHandle);
+    } else {
+        *frameCount = desc->mFrameCountHAL;
+    }
+    if (*frameCount == 0) {
+        ALOGE("AudioSystem::getFrameCountHAL failed for ioHandle %d", ioHandle);
+        return BAD_VALUE;
+    }
+
+    ALOGV("getFrameCountHAL() ioHandle %d, frameCount %zu", ioHandle, *frameCount);
+
+    return NO_ERROR;
+}
+
 // ---------------------------------------------------------------------------
+
+
+void AudioSystem::AudioFlingerClient::clearIoCache()
+{
+    Mutex::Autolock _l(mLock);
+    mIoDescriptors.clear();
+    mInBuffSize = 0;
+    mInSamplingRate = 0;
+    mInFormat = AUDIO_FORMAT_DEFAULT;
+    mInChannelMask = AUDIO_CHANNEL_NONE;
+}
 
 void AudioSystem::AudioFlingerClient::binderDied(const wp<IBinder>& who __unused)
 {
@@ -464,11 +474,8 @@ void AudioSystem::AudioFlingerClient::binderDied(const wp<IBinder>& who __unused
         cb = gAudioErrorCallback;
     }
 
-    {
-        // clear output handles and stream to output map caches
-        Mutex::Autolock _l(gLockCache);
-        AudioSystem::gOutputs.clear();
-    }
+    // clear output handles and stream to output map caches
+    clearIoCache();
 
     if (cb) {
         cb(DEAD_OBJECT);
@@ -476,74 +483,201 @@ void AudioSystem::AudioFlingerClient::binderDied(const wp<IBinder>& who __unused
     ALOGW("AudioFlinger server died!");
 }
 
-void AudioSystem::AudioFlingerClient::ioConfigChanged(int event, audio_io_handle_t ioHandle,
-        const void *param2) {
+void AudioSystem::AudioFlingerClient::ioConfigChanged(audio_io_config_event event,
+                                                      const sp<AudioIoDescriptor>& ioDesc) {
     ALOGV("ioConfigChanged() event %d", event);
-    const OutputDescriptor *desc;
-    audio_stream_type_t stream;
 
-    if (ioHandle == AUDIO_IO_HANDLE_NONE) return;
+    if (ioDesc == 0 || ioDesc->mIoHandle == AUDIO_IO_HANDLE_NONE) return;
 
-    Mutex::Autolock _l(AudioSystem::gLockCache);
+    audio_port_handle_t deviceId = AUDIO_PORT_HANDLE_NONE;
+    Vector < sp<AudioDeviceCallback> > callbacks;
 
-    switch (event) {
-    case STREAM_CONFIG_CHANGED:
-        break;
-    case OUTPUT_OPENED: {
-        if (gOutputs.indexOfKey(ioHandle) >= 0) {
-            ALOGV("ioConfigChanged() opening already existing output! %d", ioHandle);
-            break;
-        }
-        if (param2 == NULL) break;
-        desc = (const OutputDescriptor *)param2;
+    {
+        Mutex::Autolock _l(mLock);
 
-        OutputDescriptor *outputDesc =  new OutputDescriptor(*desc);
-        gOutputs.add(ioHandle, outputDesc);
-        ALOGV("ioConfigChanged() new output samplingRate %u, format %#x channel mask %#x frameCount %zu "
-                "latency %d",
-                outputDesc->samplingRate, outputDesc->format, outputDesc->channelMask,
-                outputDesc->frameCount, outputDesc->latency);
+        switch (event) {
+        case AUDIO_OUTPUT_OPENED:
+        case AUDIO_INPUT_OPENED: {
+            sp<AudioIoDescriptor> oldDesc = getIoDescriptor_l(ioDesc->mIoHandle);
+            if (oldDesc == 0) {
+                mIoDescriptors.add(ioDesc->mIoHandle, ioDesc);
+            } else {
+                deviceId = oldDesc->getDeviceId();
+                mIoDescriptors.replaceValueFor(ioDesc->mIoHandle, ioDesc);
+            }
+
+            if (ioDesc->getDeviceId() != AUDIO_PORT_HANDLE_NONE) {
+                deviceId = ioDesc->getDeviceId();
+                ssize_t ioIndex = mAudioDeviceCallbacks.indexOfKey(ioDesc->mIoHandle);
+                if (ioIndex >= 0) {
+                    callbacks = mAudioDeviceCallbacks.valueAt(ioIndex);
+                }
+            }
+            ALOGV("ioConfigChanged() new %s opened %d samplingRate %u, format %#x channel mask %#x "
+                    "frameCount %zu deviceId %d", event == AUDIO_OUTPUT_OPENED ? "output" : "input",
+                    ioDesc->mIoHandle, ioDesc->mSamplingRate, ioDesc->mFormat, ioDesc->mChannelMask,
+                    ioDesc->mFrameCount, ioDesc->getDeviceId());
+            } break;
+        case AUDIO_OUTPUT_CLOSED:
+        case AUDIO_INPUT_CLOSED: {
+            if (getIoDescriptor_l(ioDesc->mIoHandle) == 0) {
+                ALOGW("ioConfigChanged() closing unknown %s %d",
+                      event == AUDIO_OUTPUT_CLOSED ? "output" : "input", ioDesc->mIoHandle);
+                break;
+            }
+            ALOGV("ioConfigChanged() %s %d closed",
+                  event == AUDIO_OUTPUT_CLOSED ? "output" : "input", ioDesc->mIoHandle);
+
+            mIoDescriptors.removeItem(ioDesc->mIoHandle);
+            mAudioDeviceCallbacks.removeItem(ioDesc->mIoHandle);
+            } break;
+
+        case AUDIO_OUTPUT_CONFIG_CHANGED:
+        case AUDIO_INPUT_CONFIG_CHANGED: {
+            sp<AudioIoDescriptor> oldDesc = getIoDescriptor_l(ioDesc->mIoHandle);
+            if (oldDesc == 0) {
+                ALOGW("ioConfigChanged() modifying unknown output! %d", ioDesc->mIoHandle);
+                break;
+            }
+
+            deviceId = oldDesc->getDeviceId();
+            mIoDescriptors.replaceValueFor(ioDesc->mIoHandle, ioDesc);
+
+            if (deviceId != ioDesc->getDeviceId()) {
+                deviceId = ioDesc->getDeviceId();
+                ssize_t ioIndex = mAudioDeviceCallbacks.indexOfKey(ioDesc->mIoHandle);
+                if (ioIndex >= 0) {
+                    callbacks = mAudioDeviceCallbacks.valueAt(ioIndex);
+                }
+            }
+            ALOGV("ioConfigChanged() new config for %s %d samplingRate %u, format %#x "
+                    "channel mask %#x frameCount %zu frameCountHAL %zu deviceId %d",
+                    event == AUDIO_OUTPUT_CONFIG_CHANGED ? "output" : "input",
+                    ioDesc->mIoHandle, ioDesc->mSamplingRate, ioDesc->mFormat,
+                    ioDesc->mChannelMask, ioDesc->mFrameCount, ioDesc->mFrameCountHAL, ioDesc->getDeviceId());
+
         } break;
-    case OUTPUT_CLOSED: {
-        if (gOutputs.indexOfKey(ioHandle) < 0) {
-            ALOGW("ioConfigChanged() closing unknown output! %d", ioHandle);
-            break;
         }
-        ALOGV("ioConfigChanged() output %d closed", ioHandle);
-
-        gOutputs.removeItem(ioHandle);
-        } break;
-
-    case OUTPUT_CONFIG_CHANGED: {
-        int index = gOutputs.indexOfKey(ioHandle);
-        if (index < 0) {
-            ALOGW("ioConfigChanged() modifying unknown output! %d", ioHandle);
-            break;
-        }
-        if (param2 == NULL) break;
-        desc = (const OutputDescriptor *)param2;
-
-        ALOGV("ioConfigChanged() new config for output %d samplingRate %u, format %#x channel mask %#x "
-                "frameCount %zu latency %d",
-                ioHandle, desc->samplingRate, desc->format,
-                desc->channelMask, desc->frameCount, desc->latency);
-        OutputDescriptor *outputDesc = gOutputs.valueAt(index);
-        delete outputDesc;
-        outputDesc =  new OutputDescriptor(*desc);
-        gOutputs.replaceValueFor(ioHandle, outputDesc);
-    } break;
-    case INPUT_OPENED:
-    case INPUT_CLOSED:
-    case INPUT_CONFIG_CHANGED:
-        break;
-
+    }
+    // callbacks.size() != 0 =>  ioDesc->mIoHandle and deviceId are valid
+    for (size_t i = 0; i < callbacks.size(); i++) {
+        callbacks[i]->onAudioDeviceUpdate(ioDesc->mIoHandle, deviceId);
     }
 }
 
-void AudioSystem::setErrorCallback(audio_error_callback cb)
+status_t AudioSystem::AudioFlingerClient::getInputBufferSize(
+                                                uint32_t sampleRate, audio_format_t format,
+                                                audio_channel_mask_t channelMask, size_t* buffSize)
+{
+    const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
+    if (af == 0) {
+        return PERMISSION_DENIED;
+    }
+    Mutex::Autolock _l(mLock);
+    // Do we have a stale mInBuffSize or are we requesting the input buffer size for new values
+    if ((mInBuffSize == 0) || (sampleRate != mInSamplingRate) || (format != mInFormat)
+        || (channelMask != mInChannelMask)) {
+        size_t inBuffSize = af->getInputBufferSize(sampleRate, format, channelMask);
+        if (inBuffSize == 0) {
+            ALOGE("AudioSystem::getInputBufferSize failed sampleRate %d format %#x channelMask %x",
+                    sampleRate, format, channelMask);
+            return BAD_VALUE;
+        }
+        // A benign race is possible here: we could overwrite a fresher cache entry
+        // save the request params
+        mInSamplingRate = sampleRate;
+        mInFormat = format;
+        mInChannelMask = channelMask;
+
+        mInBuffSize = inBuffSize;
+    }
+
+    *buffSize = mInBuffSize;
+
+    return NO_ERROR;
+}
+
+sp<AudioIoDescriptor> AudioSystem::AudioFlingerClient::getIoDescriptor_l(audio_io_handle_t ioHandle)
+{
+    sp<AudioIoDescriptor> desc;
+    ssize_t index = mIoDescriptors.indexOfKey(ioHandle);
+    if (index >= 0) {
+        desc = mIoDescriptors.valueAt(index);
+    }
+    return desc;
+}
+
+sp<AudioIoDescriptor> AudioSystem::AudioFlingerClient::getIoDescriptor(audio_io_handle_t ioHandle)
+{
+    Mutex::Autolock _l(mLock);
+    return getIoDescriptor_l(ioHandle);
+}
+
+status_t AudioSystem::AudioFlingerClient::addAudioDeviceCallback(
+        const sp<AudioDeviceCallback>& callback, audio_io_handle_t audioIo)
+{
+    Mutex::Autolock _l(mLock);
+    Vector < sp<AudioDeviceCallback> > callbacks;
+    ssize_t ioIndex = mAudioDeviceCallbacks.indexOfKey(audioIo);
+    if (ioIndex >= 0) {
+        callbacks = mAudioDeviceCallbacks.valueAt(ioIndex);
+    }
+
+    for (size_t cbIndex = 0; cbIndex < callbacks.size(); cbIndex++) {
+        if (callbacks[cbIndex] == callback) {
+            return INVALID_OPERATION;
+        }
+    }
+    callbacks.add(callback);
+
+    mAudioDeviceCallbacks.replaceValueFor(audioIo, callbacks);
+    return NO_ERROR;
+}
+
+status_t AudioSystem::AudioFlingerClient::removeAudioDeviceCallback(
+        const sp<AudioDeviceCallback>& callback, audio_io_handle_t audioIo)
+{
+    Mutex::Autolock _l(mLock);
+    ssize_t ioIndex = mAudioDeviceCallbacks.indexOfKey(audioIo);
+    if (ioIndex < 0) {
+        return INVALID_OPERATION;
+    }
+    Vector < sp<AudioDeviceCallback> > callbacks = mAudioDeviceCallbacks.valueAt(ioIndex);
+
+    size_t cbIndex;
+    for (cbIndex = 0; cbIndex < callbacks.size(); cbIndex++) {
+        if (callbacks[cbIndex] == callback) {
+            break;
+        }
+    }
+    if (cbIndex == callbacks.size()) {
+        return INVALID_OPERATION;
+    }
+    callbacks.removeAt(cbIndex);
+    if (callbacks.size() != 0) {
+        mAudioDeviceCallbacks.replaceValueFor(audioIo, callbacks);
+    } else {
+        mAudioDeviceCallbacks.removeItem(audioIo);
+    }
+    return NO_ERROR;
+}
+
+/* static */ void AudioSystem::setErrorCallback(audio_error_callback cb)
 {
     Mutex::Autolock _l(gLock);
     gAudioErrorCallback = cb;
+}
+
+/*static*/ void AudioSystem::setDynPolicyCallback(dynamic_policy_callback cb)
+{
+    Mutex::Autolock _l(gLock);
+    gDynPolicyCallback = cb;
+}
+
+/*static*/ void AudioSystem::setRecordConfigCallback(record_config_callback cb)
+{
+    Mutex::Autolock _l(gLock);
+    gRecordConfigCallback = cb;
 }
 
 // client singleton for AudioPolicyService binder interface
@@ -590,18 +724,22 @@ const sp<IAudioPolicyService> AudioSystem::get_audio_policy_service()
 
 status_t AudioSystem::setDeviceConnectionState(audio_devices_t device,
                                                audio_policy_dev_state_t state,
-                                               const char *device_address)
+                                               const char *device_address,
+                                               const char *device_name)
 {
     const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
     const char *address = "";
+    const char *name = "";
 
     if (aps == 0) return PERMISSION_DENIED;
 
     if (device_address != NULL) {
         address = device_address;
     }
-
-    return aps->setDeviceConnectionState(device, state, address);
+    if (device_name != NULL) {
+        name = device_name;
+    }
+    return aps->setDeviceConnectionState(device, state, address, name);
 }
 
 audio_policy_dev_state_t AudioSystem::getDeviceConnectionState(audio_devices_t device,
@@ -653,17 +791,19 @@ status_t AudioSystem::getOutputForAttr(const audio_attributes_t *attr,
                                         audio_io_handle_t *output,
                                         audio_session_t session,
                                         audio_stream_type_t *stream,
+                                        uid_t uid,
                                         uint32_t samplingRate,
                                         audio_format_t format,
                                         audio_channel_mask_t channelMask,
                                         audio_output_flags_t flags,
+                                        audio_port_handle_t selectedDeviceId,
                                         const audio_offload_info_t *offloadInfo)
 {
     const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
     if (aps == 0) return NO_INIT;
-    return aps->getOutputForAttr(attr, output, session, stream,
+    return aps->getOutputForAttr(attr, output, session, stream, uid,
                                  samplingRate, format, channelMask,
-                                 flags, offloadInfo);
+                                 flags, selectedDeviceId, offloadInfo);
 }
 
 status_t AudioSystem::startOutput(audio_io_handle_t output,
@@ -696,14 +836,19 @@ void AudioSystem::releaseOutput(audio_io_handle_t output,
 status_t AudioSystem::getInputForAttr(const audio_attributes_t *attr,
                                 audio_io_handle_t *input,
                                 audio_session_t session,
+                                pid_t pid,
+                                uid_t uid,
                                 uint32_t samplingRate,
                                 audio_format_t format,
                                 audio_channel_mask_t channelMask,
-                                audio_input_flags_t flags)
+                                audio_input_flags_t flags,
+                                audio_port_handle_t selectedDeviceId)
 {
     const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
     if (aps == 0) return NO_INIT;
-    return aps->getInputForAttr(attr, input, session, samplingRate, format, channelMask, flags);
+    return aps->getInputForAttr(
+            attr, input, session, pid, uid,
+            samplingRate, format, channelMask, flags, selectedDeviceId);
 }
 
 status_t AudioSystem::startInput(audio_io_handle_t input,
@@ -782,7 +927,7 @@ audio_io_handle_t AudioSystem::getOutputForEffect(const effect_descriptor_t *des
 status_t AudioSystem::registerEffect(const effect_descriptor_t *desc,
                                 audio_io_handle_t io,
                                 uint32_t strategy,
-                                int session,
+                                audio_session_t session,
                                 int id)
 {
     const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
@@ -858,18 +1003,16 @@ void AudioSystem::clearAudioConfigCache()
     // called by restoreTrack_l(), which needs new IAudioFlinger and IAudioPolicyService instances
     ALOGV("clearAudioConfigCache()");
     {
-        Mutex::Autolock _l(gLockCache);
-        gOutputs.clear();
-    }
-    {
         Mutex::Autolock _l(gLock);
+        if (gAudioFlingerClient != 0) {
+            gAudioFlingerClient->clearIoCache();
+        }
         gAudioFlinger.clear();
     }
     {
         Mutex::Autolock _l(gLockAPS);
         gAudioPolicyService.clear();
     }
-    // Do not clear gAudioPortCallback
 }
 
 bool AudioSystem::isOffloadSupported(const audio_offload_info_t& info)
@@ -929,10 +1072,75 @@ status_t AudioSystem::setAudioPortConfig(const struct audio_port_config *config)
     return aps->setAudioPortConfig(config);
 }
 
-void AudioSystem::setAudioPortCallback(sp<AudioPortCallback> callBack)
+status_t AudioSystem::addAudioPortCallback(const sp<AudioPortCallback>& callback)
 {
-    Mutex::Autolock _l(gLockAPC);
-    gAudioPortCallback = callBack;
+    const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
+    if (aps == 0) return PERMISSION_DENIED;
+
+    Mutex::Autolock _l(gLockAPS);
+    if (gAudioPolicyServiceClient == 0) {
+        return NO_INIT;
+    }
+    int ret = gAudioPolicyServiceClient->addAudioPortCallback(callback);
+    if (ret == 1) {
+        aps->setAudioPortCallbacksEnabled(true);
+    }
+    return (ret < 0) ? INVALID_OPERATION : NO_ERROR;
+}
+
+/*static*/
+status_t AudioSystem::removeAudioPortCallback(const sp<AudioPortCallback>& callback)
+{
+    const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
+    if (aps == 0) return PERMISSION_DENIED;
+
+    Mutex::Autolock _l(gLockAPS);
+    if (gAudioPolicyServiceClient == 0) {
+        return NO_INIT;
+    }
+    int ret = gAudioPolicyServiceClient->removeAudioPortCallback(callback);
+    if (ret == 0) {
+        aps->setAudioPortCallbacksEnabled(false);
+    }
+    return (ret < 0) ? INVALID_OPERATION : NO_ERROR;
+}
+
+status_t AudioSystem::addAudioDeviceCallback(
+        const sp<AudioDeviceCallback>& callback, audio_io_handle_t audioIo)
+{
+    const sp<AudioFlingerClient> afc = getAudioFlingerClient();
+    if (afc == 0) {
+        return NO_INIT;
+    }
+    status_t status = afc->addAudioDeviceCallback(callback, audioIo);
+    if (status == NO_ERROR) {
+        const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
+        if (af != 0) {
+            af->registerClient(afc);
+        }
+    }
+    return status;
+}
+
+status_t AudioSystem::removeAudioDeviceCallback(
+        const sp<AudioDeviceCallback>& callback, audio_io_handle_t audioIo)
+{
+    const sp<AudioFlingerClient> afc = getAudioFlingerClient();
+    if (afc == 0) {
+        return NO_INIT;
+    }
+    return afc->removeAudioDeviceCallback(callback, audioIo);
+}
+
+audio_port_handle_t AudioSystem::getDeviceIdForIo(audio_io_handle_t audioIo)
+{
+    const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
+    if (af == 0) return PERMISSION_DENIED;
+    const sp<AudioIoDescriptor> desc = getIoDescriptor(audioIo);
+    if (desc == 0) {
+        return AUDIO_PORT_HANDLE_NONE;
+    }
+    return desc->getDeviceId();
 }
 
 status_t AudioSystem::acquireSoundTriggerSession(audio_session_t *session,
@@ -965,14 +1173,121 @@ status_t AudioSystem::registerPolicyMixes(Vector<AudioMix> mixes, bool registrat
     return aps->registerPolicyMixes(mixes, registration);
 }
 
+status_t AudioSystem::startAudioSource(const struct audio_port_config *source,
+                                       const audio_attributes_t *attributes,
+                                       audio_io_handle_t *handle)
+{
+    const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
+    if (aps == 0) return PERMISSION_DENIED;
+    return aps->startAudioSource(source, attributes, handle);
+}
+
+status_t AudioSystem::stopAudioSource(audio_io_handle_t handle)
+{
+    const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
+    if (aps == 0) return PERMISSION_DENIED;
+    return aps->stopAudioSource(handle);
+}
+
+status_t AudioSystem::setMasterMono(bool mono)
+{
+    const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
+    if (aps == 0) return PERMISSION_DENIED;
+    return aps->setMasterMono(mono);
+}
+
+status_t AudioSystem::getMasterMono(bool *mono)
+{
+    const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
+    if (aps == 0) return PERMISSION_DENIED;
+    return aps->getMasterMono(mono);
+}
+
 // ---------------------------------------------------------------------------
+
+int AudioSystem::AudioPolicyServiceClient::addAudioPortCallback(
+        const sp<AudioPortCallback>& callback)
+{
+    Mutex::Autolock _l(mLock);
+    for (size_t i = 0; i < mAudioPortCallbacks.size(); i++) {
+        if (mAudioPortCallbacks[i] == callback) {
+            return -1;
+        }
+    }
+    mAudioPortCallbacks.add(callback);
+    return mAudioPortCallbacks.size();
+}
+
+int AudioSystem::AudioPolicyServiceClient::removeAudioPortCallback(
+        const sp<AudioPortCallback>& callback)
+{
+    Mutex::Autolock _l(mLock);
+    size_t i;
+    for (i = 0; i < mAudioPortCallbacks.size(); i++) {
+        if (mAudioPortCallbacks[i] == callback) {
+            break;
+        }
+    }
+    if (i == mAudioPortCallbacks.size()) {
+        return -1;
+    }
+    mAudioPortCallbacks.removeAt(i);
+    return mAudioPortCallbacks.size();
+}
+
+
+void AudioSystem::AudioPolicyServiceClient::onAudioPortListUpdate()
+{
+    Mutex::Autolock _l(mLock);
+    for (size_t i = 0; i < mAudioPortCallbacks.size(); i++) {
+        mAudioPortCallbacks[i]->onAudioPortListUpdate();
+    }
+}
+
+void AudioSystem::AudioPolicyServiceClient::onAudioPatchListUpdate()
+{
+    Mutex::Autolock _l(mLock);
+    for (size_t i = 0; i < mAudioPortCallbacks.size(); i++) {
+        mAudioPortCallbacks[i]->onAudioPatchListUpdate();
+    }
+}
+
+void AudioSystem::AudioPolicyServiceClient::onDynamicPolicyMixStateUpdate(
+        String8 regId, int32_t state)
+{
+    ALOGV("AudioPolicyServiceClient::onDynamicPolicyMixStateUpdate(%s, %d)", regId.string(), state);
+    dynamic_policy_callback cb = NULL;
+    {
+        Mutex::Autolock _l(AudioSystem::gLock);
+        cb = gDynPolicyCallback;
+    }
+
+    if (cb != NULL) {
+        cb(DYNAMIC_POLICY_EVENT_MIX_STATE_UPDATE, regId, state);
+    }
+}
+
+void AudioSystem::AudioPolicyServiceClient::onRecordingConfigurationUpdate(
+        int event, audio_session_t session, audio_source_t source,
+        const audio_config_base_t *clientConfig, const audio_config_base_t *deviceConfig,
+        audio_patch_handle_t patchHandle) {
+    record_config_callback cb = NULL;
+    {
+        Mutex::Autolock _l(AudioSystem::gLock);
+        cb = gRecordConfigCallback;
+    }
+
+    if (cb != NULL) {
+        cb(event, session, source, clientConfig, deviceConfig, patchHandle);
+    }
+}
 
 void AudioSystem::AudioPolicyServiceClient::binderDied(const wp<IBinder>& who __unused)
 {
     {
-        Mutex::Autolock _l(gLockAPC);
-        if (gAudioPortCallback != 0) {
-            gAudioPortCallback->onServiceDied();
+        Mutex::Autolock _l(mLock);
+        for (size_t i = 0; i < mAudioPortCallbacks.size(); i++) {
+            mAudioPortCallbacks[i]->onServiceDied();
         }
     }
     {
@@ -983,20 +1298,4 @@ void AudioSystem::AudioPolicyServiceClient::binderDied(const wp<IBinder>& who __
     ALOGW("AudioPolicyService server died!");
 }
 
-void AudioSystem::AudioPolicyServiceClient::onAudioPortListUpdate()
-{
-    Mutex::Autolock _l(gLockAPC);
-    if (gAudioPortCallback != 0) {
-        gAudioPortCallback->onAudioPortListUpdate();
-    }
-}
-
-void AudioSystem::AudioPolicyServiceClient::onAudioPatchListUpdate()
-{
-    Mutex::Autolock _l(gLockAPC);
-    if (gAudioPortCallback != 0) {
-        gAudioPortCallback->onAudioPatchListUpdate();
-    }
-}
-
-}; // namespace android
+} // namespace android

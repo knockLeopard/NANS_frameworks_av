@@ -31,9 +31,10 @@
 
 #ifdef ANDROID
 #include "VideoSource.h"
-
-#include <media/stagefright/OMXClient.h>
-#include <media/stagefright/OMXCodec.h>
+#include <media/stagefright/foundation/ABuffer.h>
+#include <media/stagefright/foundation/ALooper.h>
+#include <media/stagefright/foundation/AMessage.h>
+#include <media/stagefright/MediaCodecSource.h>
 #endif
 
 namespace android {
@@ -100,7 +101,7 @@ struct MyTransmitter : public AHandler {
         mLooper->registerHandler(this);
         mLooper->registerHandler(mConn);
 
-        sp<AMessage> reply = new AMessage('conn', id());
+        sp<AMessage> reply = new AMessage('conn', this);
         mConn->connect(mServerURL.c_str(), reply);
 
 #ifdef ANDROID
@@ -109,17 +110,19 @@ struct MyTransmitter : public AHandler {
 
         sp<MediaSource> source = new VideoSource(width, height);
 
-        sp<MetaData> encMeta = new MetaData;
-        encMeta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_AVC);
-        encMeta->setInt32(kKeyWidth, width);
-        encMeta->setInt32(kKeyHeight, height);
+        sp<AMessage> encMeta = new AMessage;
+        encMeta->setString("mime", MEDIA_MIMETYPE_VIDEO_AVC);
+        encMeta->setInt32("width", width);
+        encMeta->setInt32("height", height);
+        encMeta->setInt32("frame-rate", 30);
+        encMeta->setInt32("bitrate", 256000);
+        encMeta->setInt32("i-frame-interval", 10);
 
-        OMXClient client;
-        client.connect();
+        sp<ALooper> encLooper = new ALooper;
+        encLooper->setName("rtsp_transmitter");
+        encLooper->start();
 
-        mEncoder = OMXCodec::Create(
-                client.interface(), encMeta,
-                true /* createEncoder */, source);
+        mEncoder = MediaCodecSource::Create(encLooper, encMeta, source);
 
         mEncoder->start();
 
@@ -229,7 +232,7 @@ struct MyTransmitter : public AHandler {
         request.append("\r\n");
         request.append(sdp);
 
-        sp<AMessage> reply = new AMessage('anno', id());
+        sp<AMessage> reply = new AMessage('anno', this);
         mConn->sendRequest(request.c_str(), reply);
     }
 
@@ -350,7 +353,7 @@ struct MyTransmitter : public AHandler {
                      << result << " (" << strerror(-result) << ")";
 
                 if (result != OK) {
-                    (new AMessage('quit', id()))->post();
+                    (new AMessage('quit', this))->post();
                     break;
                 }
 
@@ -381,7 +384,7 @@ struct MyTransmitter : public AHandler {
                     if (response->mStatusCode == 401) {
                         if (mAuthType != NONE) {
                             LOG(INFO) << "FAILED to authenticate";
-                            (new AMessage('quit', id()))->post();
+                            (new AMessage('quit', this))->post();
                             break;
                         }
 
@@ -391,14 +394,14 @@ struct MyTransmitter : public AHandler {
                 }
 
                 if (result != OK || response->mStatusCode != 200) {
-                    (new AMessage('quit', id()))->post();
+                    (new AMessage('quit', this))->post();
                     break;
                 }
 
                 unsigned rtpPort;
                 ARTPConnection::MakePortPair(&mRTPSocket, &mRTCPSocket, &rtpPort);
 
-                // (new AMessage('poll', id()))->post();
+                // (new AMessage('poll', this))->post();
 
                 AString request;
                 request.append("SETUP ");
@@ -414,7 +417,7 @@ struct MyTransmitter : public AHandler {
                 request.append(";mode=record\r\n");
                 request.append("\r\n");
 
-                sp<AMessage> reply = new AMessage('setu', id());
+                sp<AMessage> reply = new AMessage('setu', this);
                 mConn->sendRequest(request.c_str(), reply);
                 break;
             }
@@ -468,7 +471,7 @@ struct MyTransmitter : public AHandler {
                 }
 
                 if (result != OK || response->mStatusCode != 200) {
-                    (new AMessage('quit', id()))->post();
+                    (new AMessage('quit', this))->post();
                     break;
                 }
 
@@ -535,7 +538,7 @@ struct MyTransmitter : public AHandler {
                 request.append("\r\n");
                 request.append("\r\n");
 
-                sp<AMessage> reply = new AMessage('reco', id());
+                sp<AMessage> reply = new AMessage('reco', this);
                 mConn->sendRequest(request.c_str(), reply);
                 break;
             }
@@ -558,13 +561,13 @@ struct MyTransmitter : public AHandler {
                 }
 
                 if (result != OK) {
-                    (new AMessage('quit', id()))->post();
+                    (new AMessage('quit', this))->post();
                     break;
                 }
 
-                (new AMessage('more', id()))->post();
-                (new AMessage('sr  ', id()))->post();
-                (new AMessage('aliv', id()))->post(30000000ll);
+                (new AMessage('more', this))->post();
+                (new AMessage('sr  ', this))->post();
+                (new AMessage('aliv', this))->post(30000000ll);
                 break;
             }
 
@@ -586,7 +589,7 @@ struct MyTransmitter : public AHandler {
                 request.append("\r\n");
                 request.append("\r\n");
 
-                sp<AMessage> reply = new AMessage('opts', id());
+                sp<AMessage> reply = new AMessage('opts', this);
                 mConn->sendRequest(request.c_str(), reply);
                 break;
             }
@@ -603,7 +606,7 @@ struct MyTransmitter : public AHandler {
                     break;
                 }
 
-                (new AMessage('aliv', id()))->post(30000000ll);
+                (new AMessage('aliv', this))->post(30000000ll);
                 break;
             }
 
@@ -702,7 +705,7 @@ struct MyTransmitter : public AHandler {
                     request.append("\r\n");
                     request.append("\r\n");
 
-                    sp<AMessage> reply = new AMessage('paus', id());
+                    sp<AMessage> reply = new AMessage('paus', this);
                     mConn->sendRequest(request.c_str(), reply);
                 }
                 break;
@@ -753,7 +756,7 @@ struct MyTransmitter : public AHandler {
                 request.append("\r\n");
                 request.append("\r\n");
 
-                sp<AMessage> reply = new AMessage('tear', id());
+                sp<AMessage> reply = new AMessage('tear', this);
                 mConn->sendRequest(request.c_str(), reply);
                 break;
             }
@@ -775,7 +778,7 @@ struct MyTransmitter : public AHandler {
                     CHECK(response != NULL);
                 }
 
-                (new AMessage('quit', id()))->post();
+                (new AMessage('quit', this))->post();
                 break;
             }
 
@@ -784,14 +787,14 @@ struct MyTransmitter : public AHandler {
                 LOG(INFO) << "disconnect completed";
 
                 mConnected = false;
-                (new AMessage('quit', id()))->post();
+                (new AMessage('quit', this))->post();
                 break;
             }
 
             case 'quit':
             {
                 if (mConnected) {
-                    mConn->disconnect(new AMessage('disc', id()));
+                    mConn->disconnect(new AMessage('disc', this));
                     break;
                 }
 

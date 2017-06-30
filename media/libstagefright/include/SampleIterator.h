@@ -14,11 +14,15 @@
  * limitations under the License.
  */
 
+#ifndef SAMPLE_ITERATOR_H_
+
+#define SAMPLE_ITERATOR_H_
+
 #include <utils/Vector.h>
 
 namespace android {
 
-struct SampleTable;
+class SampleTable;
 
 struct SampleIterator {
     SampleIterator(SampleTable *table);
@@ -75,3 +79,4 @@ private:
 
 }  // namespace android
 
+#endif  // SAMPLE_ITERATOR_H_

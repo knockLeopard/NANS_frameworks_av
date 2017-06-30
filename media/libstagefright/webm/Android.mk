@@ -1,8 +1,11 @@
 LOCAL_PATH:= $(call my-dir)
 include $(CLEAR_VARS)
 
-LOCAL_CPPFLAGS += -D__STDINT_LIMITS \
-                  -Werror
+LOCAL_CPPFLAGS += -D__STDINT_LIMITS
+
+LOCAL_CFLAGS += -Werror -Wall
+LOCAL_CLANG := true
+LOCAL_SANITIZE := unsigned-integer-overflow signed-integer-overflow
 
 LOCAL_SRC_FILES:= EbmlUtil.cpp        \
                   WebmElement.cpp     \

@@ -44,15 +44,6 @@ class IAudioFlinger : public IInterface
 public:
     DECLARE_META_INTERFACE(AudioFlinger);
 
-    // or-able bits shared by createTrack and openRecord, but not all combinations make sense
-    enum {
-        TRACK_DEFAULT = 0,  // client requests a default AudioTrack
-        TRACK_TIMED   = 1,  // client requests a TimedAudioTrack
-        TRACK_FAST    = 2,  // client requests a fast AudioTrack or AudioRecord
-        TRACK_OFFLOAD = 4,  // client requests offload to hw codec
-        TRACK_DIRECT = 8,   // client requests a direct output
-    };
-    typedef uint32_t track_flags_t;
 
     // invariant on exit for all APIs that return an sp<>:
     //   (return value != 0) == (*status == NO_ERROR)
@@ -66,14 +57,15 @@ public:
                                 audio_format_t format,
                                 audio_channel_mask_t channelMask,
                                 size_t *pFrameCount,
-                                track_flags_t *flags,
+                                audio_output_flags_t *flags,
                                 const sp<IMemory>& sharedBuffer,
                                 // On successful return, AudioFlinger takes over the handle
                                 // reference and will release it when the track is destroyed.
                                 // However on failure, the client is responsible for release.
                                 audio_io_handle_t output,
+                                pid_t pid,
                                 pid_t tid,  // -1 means unused, otherwise must be valid non-0
-                                int *sessionId,
+                                audio_session_t *sessionId,
                                 int clientUid,
                                 status_t *status) = 0;
 
@@ -85,21 +77,29 @@ public:
                                 uint32_t sampleRate,
                                 audio_format_t format,
                                 audio_channel_mask_t channelMask,
+                                const String16& callingPackage,
                                 size_t *pFrameCount,
-                                track_flags_t *flags,
+                                audio_input_flags_t *flags,
+                                pid_t pid,
                                 pid_t tid,  // -1 means unused, otherwise must be valid non-0
-                                int *sessionId,
+                                int clientUid,
+                                audio_session_t *sessionId,
                                 size_t *notificationFrames,
                                 sp<IMemory>& cblk,
                                 sp<IMemory>& buffers,   // return value 0 means it follows cblk
                                 status_t *status) = 0;
 
+    // FIXME Surprisingly, format/latency don't work for input handles
+
     /* query the audio hardware state. This state never changes,
      * and therefore can be cached.
      */
-    virtual     uint32_t    sampleRate(audio_io_handle_t output) const = 0;
+    virtual     uint32_t    sampleRate(audio_io_handle_t ioHandle) const = 0;
+
+    // reserved; formerly channelCount()
+
     virtual     audio_format_t format(audio_io_handle_t output) const = 0;
-    virtual     size_t      frameCount(audio_io_handle_t output) const = 0;
+    virtual     size_t      frameCount(audio_io_handle_t ioHandle) const = 0;
 
     // return estimated latency in milliseconds
     virtual     uint32_t    latency(audio_io_handle_t output) const = 0;
@@ -142,6 +142,7 @@ public:
     virtual void registerClient(const sp<IAudioFlingerClient>& client) = 0;
 
     // retrieve the audio recording buffer size
+    // FIXME This API assumes a route, and so should be deprecated.
     virtual size_t getInputBufferSize(uint32_t sampleRate, audio_format_t format,
             audio_channel_mask_t channelMask) const = 0;
 
@@ -176,10 +177,10 @@ public:
 
     virtual uint32_t getInputFramesLost(audio_io_handle_t ioHandle) const = 0;
 
-    virtual audio_unique_id_t newAudioUniqueId() = 0;
+    virtual audio_unique_id_t newAudioUniqueId(audio_unique_id_use_t use) = 0;
 
-    virtual void acquireAudioSessionId(int audioSession, pid_t pid) = 0;
-    virtual void releaseAudioSessionId(int audioSession, pid_t pid) = 0;
+    virtual void acquireAudioSessionId(audio_session_t audioSession, pid_t pid) = 0;
+    virtual void releaseAudioSessionId(audio_session_t audioSession, pid_t pid) = 0;
 
     virtual status_t queryNumberEffects(uint32_t *numEffects) const = 0;
 
@@ -194,12 +195,13 @@ public:
                                     int32_t priority,
                                     // AudioFlinger doesn't take over handle reference from client
                                     audio_io_handle_t output,
-                                    int sessionId,
+                                    audio_session_t sessionId,
+                                    const String16& callingPackage,
                                     status_t *status,
                                     int *id,
                                     int *enabled) = 0;
 
-    virtual status_t moveEffects(int session, audio_io_handle_t srcOutput,
+    virtual status_t moveEffects(audio_session_t session, audio_io_handle_t srcOutput,
                                     audio_io_handle_t dstOutput) = 0;
 
     virtual audio_module_handle_t loadHwModule(const char *name) = 0;
@@ -237,6 +239,12 @@ public:
 
     /* Get the HW synchronization source used for an audio session */
     virtual audio_hw_sync_t getAudioHwSyncForSession(audio_session_t sessionId) = 0;
+
+    /* Indicate JAVA services are ready (scheduling, power management ...) */
+    virtual status_t systemReady() = 0;
+
+    // Returns the number of frames per audio HAL buffer.
+    virtual size_t frameCountHAL(audio_io_handle_t ioHandle) const = 0;
 };
 
 

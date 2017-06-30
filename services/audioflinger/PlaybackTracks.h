@@ -31,9 +31,9 @@ public:
                                 size_t frameCount,
                                 void *buffer,
                                 const sp<IMemory>& sharedBuffer,
-                                int sessionId,
+                                audio_session_t sessionId,
                                 int uid,
-                                IAudioFlinger::track_flags_t flags,
+                                audio_output_flags_t flags,
                                 track_type type);
     virtual             ~Track();
     virtual status_t    initCheck() const;
@@ -42,7 +42,7 @@ public:
             void        dump(char* buffer, size_t size, bool active);
     virtual status_t    start(AudioSystem::sync_event_t event =
                                     AudioSystem::SYNC_EVENT_NONE,
-                             int triggerSession = 0);
+                             audio_session_t triggerSession = AUDIO_SESSION_NONE);
     virtual void        stop();
             void        pause();
 
@@ -55,8 +55,9 @@ public:
             audio_stream_type_t streamType() const {
                 return mStreamType;
             }
-            bool        isOffloaded() const { return (mFlags & IAudioFlinger::TRACK_OFFLOAD) != 0; }
-            bool        isDirect() const { return (mFlags & IAudioFlinger::TRACK_DIRECT) != 0; }
+            bool        isOffloaded() const
+                                { return (mFlags & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD) != 0; }
+            bool        isDirect() const { return (mFlags & AUDIO_OUTPUT_FLAG_DIRECT) != 0; }
             status_t    setParameters(const String8& keyValuePairs);
             status_t    attachAuxEffect(int EffectId);
             void        setAuxBuffer(int EffectId, int32_t *buffer);
@@ -72,6 +73,8 @@ public:
 
     virtual status_t    setSyncEvent(const sp<SyncEvent>& event);
 
+    virtual bool        isFastTrack() const { return (mFlags & AUDIO_OUTPUT_FLAG_FAST) != 0; }
+
 protected:
     // for numerous
     friend class PlaybackThread;
@@ -83,13 +86,13 @@ protected:
                         Track& operator = (const Track&);
 
     // AudioBufferProvider interface
-    virtual status_t getNextBuffer(AudioBufferProvider::Buffer* buffer,
-                                   int64_t pts = kInvalidPTS);
+    virtual status_t getNextBuffer(AudioBufferProvider::Buffer* buffer);
     // releaseBuffer() not overridden
 
     // ExtendedAudioBufferProvider interface
     virtual size_t framesReady() const;
-    virtual size_t framesReleased() const;
+    virtual int64_t framesReleased() const;
+    virtual void onTimestamp(const ExtendedTimestamp &timestamp);
 
     bool isPausing() const { return mState == PAUSING; }
     bool isPaused() const { return mState == PAUSED; }
@@ -101,17 +104,22 @@ protected:
     void flushAck();
     bool isResumePending();
     void resumeAck();
+    void updateTrackFrameInfo(int64_t trackFramesReleased, int64_t sinkFramesWritten,
+            const ExtendedTimestamp &timeStamp);
 
     sp<IMemory> sharedBuffer() const { return mSharedBuffer; }
 
     // framesWritten is cumulative, never reset, and is shared all tracks
     // audioHalFrames is derived from output latency
     // FIXME parameters not needed, could get them from the thread
-    bool presentationComplete(size_t framesWritten, size_t audioHalFrames);
+    bool presentationComplete(int64_t framesWritten, size_t audioHalFrames);
+    void signalClientFlag(int32_t flag);
 
 public:
     void triggerEvents(AudioSystem::sync_event_t type);
     void invalidate();
+    void disable();
+
     bool isInvalid() const { return mIsInvalid; }
     int fastIndex() const { return mFastIndex; }
 
@@ -138,6 +146,12 @@ protected:
     size_t              mPresentationCompleteFrames; // number of frames written to the
                                     // audio HAL when this track will be fully rendered
                                     // zero means not monitoring
+
+    // access these three variables only when holding thread lock.
+    LinearMap<int64_t> mFrameMap;           // track frame to server frame mapping
+
+    ExtendedTimestamp  mSinkTimestamp;
+
 private:
     // The following fields are only for fast tracks, and should be in a subclass
     int                 mFastIndex; // index within FastMixerState::mFastTracks[];
@@ -155,98 +169,8 @@ private:
     AudioTrackServerProxy*  mAudioTrackServerProxy;
     bool                mResumeToStopping; // track was paused in stopping state.
     bool                mFlushHwPending; // track requests for thread flush
-
-    // for last call to getTimestamp
-    bool                mPreviousValid;
-    uint32_t            mPreviousFramesWritten;
-    AudioTimestamp      mPreviousTimestamp;
+    audio_output_flags_t mFlags;
 };  // end of Track
-
-class TimedTrack : public Track {
-  public:
-    static sp<TimedTrack> create(PlaybackThread *thread,
-                                 const sp<Client>& client,
-                                 audio_stream_type_t streamType,
-                                 uint32_t sampleRate,
-                                 audio_format_t format,
-                                 audio_channel_mask_t channelMask,
-                                 size_t frameCount,
-                                 const sp<IMemory>& sharedBuffer,
-                                 int sessionId,
-                                 int uid);
-    virtual ~TimedTrack();
-
-    class TimedBuffer {
-      public:
-        TimedBuffer();
-        TimedBuffer(const sp<IMemory>& buffer, int64_t pts);
-        const sp<IMemory>& buffer() const { return mBuffer; }
-        int64_t pts() const { return mPTS; }
-        uint32_t position() const { return mPosition; }
-        void setPosition(uint32_t pos) { mPosition = pos; }
-      private:
-        sp<IMemory> mBuffer;
-        int64_t     mPTS;
-        uint32_t    mPosition;
-    };
-
-    // Mixer facing methods.
-    virtual size_t framesReady() const;
-
-    // AudioBufferProvider interface
-    virtual status_t getNextBuffer(AudioBufferProvider::Buffer* buffer,
-                                   int64_t pts);
-    virtual void releaseBuffer(AudioBufferProvider::Buffer* buffer);
-
-    // Client/App facing methods.
-    status_t    allocateTimedBuffer(size_t size,
-                                    sp<IMemory>* buffer);
-    status_t    queueTimedBuffer(const sp<IMemory>& buffer,
-                                 int64_t pts);
-    status_t    setMediaTimeTransform(const LinearTransform& xform,
-                                      TimedAudioTrack::TargetTimeline target);
-
-  private:
-    TimedTrack(PlaybackThread *thread,
-               const sp<Client>& client,
-               audio_stream_type_t streamType,
-               uint32_t sampleRate,
-               audio_format_t format,
-               audio_channel_mask_t channelMask,
-               size_t frameCount,
-               const sp<IMemory>& sharedBuffer,
-               int sessionId,
-               int uid);
-
-    void timedYieldSamples_l(AudioBufferProvider::Buffer* buffer);
-    void timedYieldSilence_l(uint32_t numFrames,
-                             AudioBufferProvider::Buffer* buffer);
-    void trimTimedBufferQueue_l();
-    void trimTimedBufferQueueHead_l(const char* logTag);
-    void updateFramesPendingAfterTrim_l(const TimedBuffer& buf,
-                                        const char* logTag);
-
-    uint64_t            mLocalTimeFreq;
-    LinearTransform     mLocalTimeToSampleTransform;
-    LinearTransform     mMediaTimeToSampleTransform;
-    sp<MemoryDealer>    mTimedMemoryDealer;
-
-    Vector<TimedBuffer> mTimedBufferQueue;
-    bool                mQueueHeadInFlight;
-    bool                mTrimQueueHeadOnRelease;
-    uint32_t            mFramesPendingInQueue;
-
-    uint8_t*            mTimedSilenceBuffer;
-    uint32_t            mTimedSilenceBufferSize;
-    mutable Mutex       mTimedBufferQueueLock;
-    bool                mTimedAudioOutputOnTime;
-    CCHelper            mCCHelper;
-
-    Mutex               mMediaTimeTransformLock;
-    LinearTransform     mMediaTimeTransform;
-    bool                mMediaTimeTransformValid;
-    TimedAudioTrack::TargetTimeline mMediaTimeTransformTarget;
-};
 
 
 // playback track, used by DuplicatingThread
@@ -255,7 +179,7 @@ public:
 
     class Buffer : public AudioBufferProvider::Buffer {
     public:
-        int16_t *mBuffer;
+        void *mBuffer;
     };
 
                         OutputTrack(PlaybackThread *thread,
@@ -269,9 +193,9 @@ public:
 
     virtual status_t    start(AudioSystem::sync_event_t event =
                                     AudioSystem::SYNC_EVENT_NONE,
-                             int triggerSession = 0);
+                             audio_session_t triggerSession = AUDIO_SESSION_NONE);
     virtual void        stop();
-            bool        write(int16_t* data, uint32_t frames);
+            bool        write(void* data, uint32_t frames);
             bool        bufferQueueEmpty() const { return mBufferQueue.size() == 0; }
             bool        isActive() const { return mActive; }
     const wp<ThreadBase>& thread() const { return mThread; }
@@ -281,6 +205,8 @@ private:
     status_t            obtainBuffer(AudioBufferProvider::Buffer* buffer,
                                      uint32_t waitTimeMs);
     void                clearBufferQueue();
+
+    void                restartIfDisabled();
 
     // Maximum number of pending buffers allocated by OutputTrack::write()
     static const uint8_t kMaxOverFlowBuffers = 10;
@@ -297,17 +223,21 @@ class PatchTrack : public Track, public PatchProxyBufferProvider {
 public:
 
                         PatchTrack(PlaybackThread *playbackThread,
+                                   audio_stream_type_t streamType,
                                    uint32_t sampleRate,
                                    audio_channel_mask_t channelMask,
                                    audio_format_t format,
                                    size_t frameCount,
                                    void *buffer,
-                                   IAudioFlinger::track_flags_t flags);
+                                   audio_output_flags_t flags);
     virtual             ~PatchTrack();
 
+    virtual status_t    start(AudioSystem::sync_event_t event =
+                                    AudioSystem::SYNC_EVENT_NONE,
+                             audio_session_t triggerSession = AUDIO_SESSION_NONE);
+
     // AudioBufferProvider interface
-    virtual status_t getNextBuffer(AudioBufferProvider::Buffer* buffer,
-                                   int64_t pts);
+    virtual status_t getNextBuffer(AudioBufferProvider::Buffer* buffer);
     virtual void releaseBuffer(AudioBufferProvider::Buffer* buffer);
 
     // PatchProxyBufferProvider interface
@@ -318,6 +248,8 @@ public:
             void setPeerProxy(PatchProxyBufferProvider *proxy) { mPeerProxy = proxy; }
 
 private:
+            void restartIfDisabled();
+
     sp<ClientProxy>             mProxy;
     PatchProxyBufferProvider*   mPeerProxy;
     struct timespec             mPeerTimeout;

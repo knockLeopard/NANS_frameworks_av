@@ -6,11 +6,13 @@ LOCAL_SRC_FILES := \
 
 LOCAL_C_INCLUDES := \
         $(TOP)/external/libvpx/libvpx \
-        $(TOP)/external/openssl/include \
         $(TOP)/external/libvpx/libvpx/vpx_codec \
         $(TOP)/external/libvpx/libvpx/vpx_ports \
         frameworks/av/media/libstagefright/include \
         frameworks/native/include/media/openmax \
+
+LOCAL_CLANG := true
+LOCAL_SANITIZE := signed-integer-overflow unsigned-integer-overflow
 
 LOCAL_STATIC_LIBRARIES := \
         libvpx

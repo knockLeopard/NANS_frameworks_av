@@ -17,16 +17,23 @@
 #include "SineSource.h"
 
 #include <inttypes.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
 #include <binder/ProcessState.h>
 #include <media/stagefright/foundation/ADebug.h>
+#include <media/stagefright/foundation/ALooper.h>
+#include <media/stagefright/foundation/AMessage.h>
 #include <media/stagefright/AudioPlayer.h>
 #include <media/stagefright/MediaBufferGroup.h>
+#include <media/stagefright/MediaCodecSource.h>
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MetaData.h>
 #include <media/stagefright/MPEG4Writer.h>
-#include <media/stagefright/OMXClient.h>
-#include <media/stagefright/OMXCodec.h>
 #include <media/MediaPlayerInterface.h>
+
+#include <OMX_Video.h>
 
 using namespace android;
 
@@ -261,46 +268,53 @@ int main(int argc, char **argv) {
         }
     }
 
-    OMXClient client;
-    CHECK_EQ(client.connect(), (status_t)OK);
-
     status_t err = OK;
     sp<MediaSource> source =
         new DummySource(width, height, nFrames, frameRateFps, colorFormat);
 
-    sp<MetaData> enc_meta = new MetaData;
+    sp<AMessage> enc_meta = new AMessage;
     switch (codec) {
         case 1:
-            enc_meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_MPEG4);
+            enc_meta->setString("mime", MEDIA_MIMETYPE_VIDEO_MPEG4);
             break;
         case 2:
-            enc_meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_H263);
+            enc_meta->setString("mime", MEDIA_MIMETYPE_VIDEO_H263);
             break;
         default:
-            enc_meta->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_AVC);
+            enc_meta->setString("mime", MEDIA_MIMETYPE_VIDEO_AVC);
             break;
     }
-    enc_meta->setInt32(kKeyWidth, width);
-    enc_meta->setInt32(kKeyHeight, height);
-    enc_meta->setInt32(kKeyFrameRate, frameRateFps);
-    enc_meta->setInt32(kKeyBitRate, bitRateBps);
-    enc_meta->setInt32(kKeyStride, width);
-    enc_meta->setInt32(kKeySliceHeight, height);
-    enc_meta->setInt32(kKeyIFramesInterval, iFramesIntervalSeconds);
-    enc_meta->setInt32(kKeyColorFormat, colorFormat);
+    enc_meta->setInt32("width", width);
+    enc_meta->setInt32("height", height);
+    enc_meta->setInt32("frame-rate", frameRateFps);
+    enc_meta->setInt32("bitrate", bitRateBps);
+    enc_meta->setInt32("stride", width);
+    enc_meta->setInt32("slice-height", height);
+    enc_meta->setInt32("i-frame-interval", iFramesIntervalSeconds);
+    enc_meta->setInt32("color-format", colorFormat);
     if (level != -1) {
-        enc_meta->setInt32(kKeyVideoLevel, level);
+        enc_meta->setInt32("level", level);
     }
     if (profile != -1) {
-        enc_meta->setInt32(kKeyVideoProfile, profile);
+        enc_meta->setInt32("profile", profile);
     }
 
-    sp<MediaSource> encoder =
-        OMXCodec::Create(
-                client.interface(), enc_meta, true /* createEncoder */, source,
-                0, preferSoftwareCodec ? OMXCodec::kPreferSoftwareCodecs : 0);
+    sp<ALooper> looper = new ALooper;
+    looper->setName("recordvideo");
+    looper->start();
 
-    sp<MPEG4Writer> writer = new MPEG4Writer(fileName);
+    sp<IMediaSource> encoder =
+        MediaCodecSource::Create(
+                looper, enc_meta, source, NULL /* consumer */,
+                preferSoftwareCodec ? MediaCodecSource::FLAG_PREFER_SOFTWARE_CODEC : 0);
+
+    int fd = open(fileName, O_CREAT | O_LARGEFILE | O_TRUNC | O_RDWR, S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+        fprintf(stderr, "couldn't open file");
+        return 1;
+    }
+    sp<MPEG4Writer> writer = new MPEG4Writer(fd);
+    close(fd);
     writer->addSource(encoder);
     int64_t start = systemTime();
     CHECK_EQ((status_t)OK, writer->start());
@@ -311,7 +325,6 @@ int main(int argc, char **argv) {
     int64_t end = systemTime();
 
     fprintf(stderr, "$\n");
-    client.disconnect();
 
     if (err != OK && err != ERROR_END_OF_STREAM) {
         fprintf(stderr, "record failed: %d\n", err);

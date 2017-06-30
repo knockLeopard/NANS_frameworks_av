@@ -24,7 +24,7 @@ struct ALooper;
 struct NuPlayer;
 
 struct NuPlayerDriver : public MediaPlayerInterface {
-    NuPlayerDriver();
+    NuPlayerDriver(pid_t pid);
 
     virtual status_t initCheck();
 
@@ -39,6 +39,8 @@ struct NuPlayerDriver : public MediaPlayerInterface {
 
     virtual status_t setDataSource(const sp<IStreamSource> &source);
 
+    virtual status_t setDataSource(const sp<DataSource>& dataSource);
+
     virtual status_t setVideoSurfaceTexture(
             const sp<IGraphicBufferProducer> &bufferProducer);
     virtual status_t prepare();
@@ -47,6 +49,10 @@ struct NuPlayerDriver : public MediaPlayerInterface {
     virtual status_t stop();
     virtual status_t pause();
     virtual bool isPlaying();
+    virtual status_t setPlaybackSettings(const AudioPlaybackRate &rate);
+    virtual status_t getPlaybackSettings(AudioPlaybackRate *rate);
+    virtual status_t setSyncSettings(const AVSyncSettings &sync, float videoFpsHint);
+    virtual status_t getSyncSettings(AVSyncSettings *sync, float *videoFps);
     virtual status_t seekTo(int msec);
     virtual status_t getCurrentPosition(int *msec);
     virtual status_t getDuration(int *msec);
@@ -116,9 +122,8 @@ private:
     bool mLooping;
     bool mAutoLoop;
 
-    int64_t mStartupSeekTimeUs;
-
     status_t prepare_l();
+    status_t start_l();
     void notifyListener_l(int msg, int ext1 = 0, int ext2 = 0, const Parcel *in = NULL);
 
     DISALLOW_EVIL_CONSTRUCTORS(NuPlayerDriver);

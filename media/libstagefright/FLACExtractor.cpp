@@ -615,6 +615,7 @@ status_t FLACParser::init()
             mTrackMetadata->setCString(kKeyMIMEType, MEDIA_MIMETYPE_AUDIO_RAW);
             mTrackMetadata->setInt32(kKeyChannelCount, getChannels());
             mTrackMetadata->setInt32(kKeySampleRate, getSampleRate());
+            mTrackMetadata->setInt32(kKeyPcmEncoding, kAudioEncodingPcm16bit);
             // sample rate is non-zero, so division by zero not possible
             mTrackMetadata->setInt64(kKeyDuration,
                     (getTotalSamples() * 1000000LL) / getSampleRate());
@@ -651,10 +652,10 @@ MediaBuffer *FLACParser::readBuffer(bool doSeek, FLAC__uint64 sample)
     if (doSeek) {
         // We implement the seek callback, so this works without explicit flush
         if (!FLAC__stream_decoder_seek_absolute(mDecoder, sample)) {
-            ALOGE("FLACParser::readBuffer seek to sample %llu failed", sample);
+            ALOGE("FLACParser::readBuffer seek to sample %lld failed", (long long)sample);
             return NULL;
         }
-        ALOGV("FLACParser::readBuffer seek to sample %llu succeeded", sample);
+        ALOGV("FLACParser::readBuffer seek to sample %lld succeeded", (long long)sample);
     } else {
         if (!FLAC__stream_decoder_process_single(mDecoder)) {
             ALOGE("FLACParser::readBuffer process_single failed");
@@ -674,7 +675,10 @@ MediaBuffer *FLACParser::readBuffer(bool doSeek, FLAC__uint64 sample)
     if (mWriteHeader.sample_rate != getSampleRate() ||
         mWriteHeader.channels != getChannels() ||
         mWriteHeader.bits_per_sample != getBitsPerSample()) {
-        ALOGE("FLACParser::readBuffer write changed parameters mid-stream");
+        ALOGE("FLACParser::readBuffer write changed parameters mid-stream: %d/%d/%d -> %d/%d/%d",
+                getSampleRate(), getChannels(), getBitsPerSample(),
+                mWriteHeader.sample_rate, mWriteHeader.channels, mWriteHeader.bits_per_sample);
+        return NULL;
     }
     // acquire a media buffer
     CHECK(mGroup != NULL);
@@ -804,7 +808,7 @@ size_t FLACExtractor::countTracks()
     return mInitCheck == OK ? 1 : 0;
 }
 
-sp<MediaSource> FLACExtractor::getTrack(size_t index)
+sp<IMediaSource> FLACExtractor::getTrack(size_t index)
 {
     if (mInitCheck != OK || index > 0) {
         return NULL;

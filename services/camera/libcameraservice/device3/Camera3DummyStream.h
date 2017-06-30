@@ -54,6 +54,23 @@ class Camera3DummyStream :
 
     status_t         setTransform(int transform);
 
+    virtual status_t detachBuffer(sp<GraphicBuffer>* buffer, int* fenceFd);
+
+    /**
+     * Return if this output stream is for video encoding.
+     */
+    bool isVideoStream() const;
+
+    /**
+     * Return if the consumer configuration of this stream is deferred.
+     */
+    virtual bool isConsumerConfigurationDeferred() const;
+
+    /**
+     * Set the consumer surface to the output stream.
+     */
+    virtual status_t setConsumer(sp<Surface> consumer);
+
   protected:
 
     /**
@@ -75,6 +92,8 @@ class Camera3DummyStream :
     static const int DUMMY_WIDTH = 320;
     static const int DUMMY_HEIGHT = 240;
     static const int DUMMY_FORMAT = HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED;
+    static const android_dataspace DUMMY_DATASPACE = HAL_DATASPACE_UNKNOWN;
+    static const camera3_stream_rotation_t DUMMY_ROTATION = CAMERA3_STREAM_ROTATION_0;
     static const uint32_t DUMMY_USAGE = GRALLOC_USAGE_HW_COMPOSER;
 
     /**
@@ -87,7 +106,7 @@ class Camera3DummyStream :
 
     virtual status_t configureQueueLocked();
 
-    virtual status_t getEndpointUsage(uint32_t *usage);
+    virtual status_t getEndpointUsage(uint32_t *usage) const;
 
 }; // class Camera3DummyStream
 

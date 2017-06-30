@@ -187,7 +187,7 @@ ANetworkSession::Session::Session(
         CHECK_GE(res, 0);
 
         in_addr_t addr = ntohl(localAddr.sin_addr.s_addr);
-        AString localAddrString = StringPrintf(
+        AString localAddrString = AStringPrintf(
                 "%d.%d.%d.%d",
                 (addr >> 24),
                 (addr >> 16) & 0xff,
@@ -195,7 +195,7 @@ ANetworkSession::Session::Session(
                 addr & 0xff);
 
         addr = ntohl(remoteAddr.sin_addr.s_addr);
-        AString remoteAddrString = StringPrintf(
+        AString remoteAddrString = AStringPrintf(
                 "%d.%d.%d.%d",
                 (addr >> 24),
                 (addr >> 16) & 0xff,
@@ -301,7 +301,7 @@ status_t ANetworkSession::Session::readMore() {
                 uint32_t ip = ntohl(remoteAddr.sin_addr.s_addr);
                 notify->setString(
                         "fromAddr",
-                        StringPrintf(
+                        AStringPrintf(
                             "%u.%u.%u.%u",
                             ip >> 24,
                             (ip >> 16) & 0xff,
@@ -457,7 +457,7 @@ status_t ANetworkSession::Session::readMore() {
         while (mInBuffer.size() >= 2) {
             size_t offset = 2;
 
-            unsigned payloadLen = data[1] & 0x7f;
+            uint64_t payloadLen = data[1] & 0x7f;
             if (payloadLen == 126) {
                 if (offset + 2 > mInBuffer.size()) {
                     break;
@@ -485,7 +485,7 @@ status_t ANetworkSession::Session::readMore() {
                 offset += 4;
             }
 
-            if (offset + payloadLen > mInBuffer.size()) {
+            if (payloadLen > mInBuffer.size() || offset > mInBuffer.size() - payloadLen) {
                 break;
             }
 
@@ -1318,7 +1318,8 @@ void ANetworkSession::threadLoop() {
 
         List<sp<Session> > sessionsToAdd;
 
-        for (size_t i = mSessions.size(); res > 0 && i-- > 0;) {
+        for (size_t i = mSessions.size(); res > 0 && i > 0;) {
+            i--;
             const sp<Session> &session = mSessions.valueAt(i);
 
             int s = session->socket();
@@ -1409,4 +1410,3 @@ void ANetworkSession::threadLoop() {
 }
 
 }  // namespace android
-

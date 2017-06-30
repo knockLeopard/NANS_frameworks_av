@@ -48,10 +48,36 @@ LOCAL_C_INCLUDES := \
         $(LOCAL_PATH)/include
 
 LOCAL_CFLAGS := \
-        -DOSCL_UNUSED_ARG= -DOSCL_IMPORT_REF=
+        -D"OSCL_UNUSED_ARG(x)=(void)(x)" -DOSCL_IMPORT_REF=
 
 LOCAL_CFLAGS += -Werror
+LOCAL_CLANG := true
+LOCAL_SANITIZE := signed-integer-overflow
 
 LOCAL_MODULE := libstagefright_amrwbdec
 
 include $(BUILD_STATIC_LIBRARY)
+
+################################################################################
+include $(CLEAR_VARS)
+LOCAL_SRC_FILES := \
+        test/amrwbdec_test.cpp
+
+LOCAL_C_INCLUDES := \
+        $(LOCAL_PATH)/src \
+        $(LOCAL_PATH)/include \
+        $(call include-path-for, audio-utils)
+
+LOCAL_STATIC_LIBRARIES := \
+        libstagefright_amrwbdec libsndfile
+
+LOCAL_SHARED_LIBRARIES := \
+        libaudioutils
+
+LOCAL_CLANG := true
+LOCAL_SANITIZE := signed-integer-overflow
+
+LOCAL_MODULE := libstagefright_amrwbdec_test
+LOCAL_MODULE_TAGS := tests
+
+include $(BUILD_EXECUTABLE)

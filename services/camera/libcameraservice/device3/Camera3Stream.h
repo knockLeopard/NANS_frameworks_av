@@ -57,8 +57,15 @@ namespace camera3 {
  *    re-registering buffers with HAL.
  *
  *  STATE_CONFIGURED: Stream is configured, and has registered buffers with the
- *    HAL. The stream's getBuffer/returnBuffer work. The priv pointer may still be
- *    modified.
+ *    HAL (if necessary). The stream's getBuffer/returnBuffer work. The priv
+ *    pointer may still be modified.
+ *
+ *  STATE_PREPARING: The stream's buffers are being pre-allocated for use.  On
+ *    older HALs, this is done as part of configuration, but in newer HALs
+ *    buffers may be allocated at time of first use. But some use cases require
+ *    buffer allocation upfront, to minmize disruption due to lengthy allocation
+ *    duration.  In this state, only prepareNextBuffer() and cancelPrepare()
+ *    may be called.
  *
  * Transition table:
  *
@@ -82,6 +89,14 @@ namespace camera3 {
  *    STATE_CONFIGURED     => STATE_CONSTRUCTED:
  *        When disconnect() is called after making sure stream is idle with
  *        waitUntilIdle().
+ *    STATE_CONFIGURED     => STATE_PREPARING:
+ *        When startPrepare is called before the stream has a buffer
+ *        queued back into it for the first time.
+ *    STATE_PREPARING      => STATE_CONFIGURED:
+ *        When sufficient prepareNextBuffer calls have been made to allocate
+ *        all stream buffers, or cancelPrepare is called.
+ *    STATE_CONFIGURED     => STATE_ABANDONED:
+ *        When the buffer queue of the stream is abandoned.
  *
  * Status Tracking:
  *    Each stream is tracked by StatusTracker as a separate component,
@@ -117,11 +132,17 @@ class Camera3Stream :
     int              getId() const;
 
     /**
+     * Get the output stream set id.
+     */
+    int              getStreamSetId() const;
+
+    /**
      * Get the stream's dimensions and format
      */
-    uint32_t         getWidth() const;
-    uint32_t         getHeight() const;
-    int              getFormat() const;
+    uint32_t          getWidth() const;
+    uint32_t          getHeight() const;
+    int               getFormat() const;
+    android_dataspace getDataSpace() const;
 
     /**
      * Start the stream configuration process. Returns a handle to the stream's
@@ -154,7 +175,8 @@ class Camera3Stream :
      *   OK on a successful configuration
      *   NO_INIT in case of a serious error from the HAL device
      *   NO_MEMORY in case of an error registering buffers
-     *   INVALID_OPERATION in case connecting to the consumer failed
+     *   INVALID_OPERATION in case connecting to the consumer failed or consumer
+     *       doesn't exist yet.
      */
     status_t         finishConfiguration(camera3_device *hal3Device);
 
@@ -164,6 +186,89 @@ class Camera3Stream :
      * This is done if the HAL rejects the proposed combined stream configuration
      */
     status_t         cancelConfiguration();
+
+    /**
+     * Determine whether the stream has already become in-use (has received
+     * a valid filled buffer), which determines if a stream can still have
+     * prepareNextBuffer called on it.
+     */
+    bool             isUnpreparable();
+
+    /**
+     * Start stream preparation. May only be called in the CONFIGURED state,
+     * when no valid buffers have yet been returned to this stream. Prepares
+     * up to maxCount buffers, or the maximum number of buffers needed by the
+     * pipeline if maxCount is ALLOCATE_PIPELINE_MAX.
+     *
+     * If no prepartion is necessary, returns OK and does not transition to
+     * PREPARING state. Otherwise, returns NOT_ENOUGH_DATA and transitions
+     * to PREPARING.
+     *
+     * This call performs no allocation, so is quick to call.
+     *
+     * Returns:
+     *    OK if no more buffers need to be preallocated
+     *    NOT_ENOUGH_DATA if calls to prepareNextBuffer are needed to finish
+     *        buffer pre-allocation, and transitions to the PREPARING state.
+     *    NO_INIT in case of a serious error from the HAL device
+     *    INVALID_OPERATION if called when not in CONFIGURED state, or a
+     *        valid buffer has already been returned to this stream.
+     */
+    status_t         startPrepare(int maxCount);
+
+    /**
+     * Check if the stream is mid-preparing.
+     */
+    bool             isPreparing() const;
+
+    /**
+     * Continue stream buffer preparation by allocating the next
+     * buffer for this stream.  May only be called in the PREPARED state.
+     *
+     * Returns OK and transitions to the CONFIGURED state if all buffers
+     * are allocated after the call concludes. Otherwise returns NOT_ENOUGH_DATA.
+     *
+     * This call allocates one buffer, which may take several milliseconds for
+     * large buffers.
+     *
+     * Returns:
+     *    OK if no more buffers need to be preallocated, and transitions
+     *        to the CONFIGURED state.
+     *    NOT_ENOUGH_DATA if more calls to prepareNextBuffer are needed to finish
+     *        buffer pre-allocation.
+     *    NO_INIT in case of a serious error from the HAL device
+     *    INVALID_OPERATION if called when not in CONFIGURED state, or a
+     *        valid buffer has already been returned to this stream.
+     */
+    status_t         prepareNextBuffer();
+
+    /**
+     * Cancel stream preparation early. In case allocation needs to be
+     * stopped, this method transitions the stream back to the CONFIGURED state.
+     * Buffers that have been allocated with prepareNextBuffer remain that way,
+     * but a later use of prepareNextBuffer will require just as many
+     * calls as if the earlier prepare attempt had not existed.
+     *
+     * Returns:
+     *    OK if cancellation succeeded, and transitions to the CONFIGURED state
+     *    INVALID_OPERATION if not in the PREPARING state
+     *    NO_INIT in case of a serious error from the HAL device
+     */
+    status_t        cancelPrepare();
+
+    /**
+     * Tear down memory for this stream. This frees all unused gralloc buffers
+     * allocated for this stream, but leaves it ready for operation afterward.
+     *
+     * May only be called in the CONFIGURED state, and keeps the stream in
+     * the CONFIGURED state.
+     *
+     * Returns:
+     *    OK if teardown succeeded.
+     *    INVALID_OPERATION if not in the CONFIGURED state
+     *    NO_INIT in case of a serious error from the HAL device
+     */
+    status_t       tearDown();
 
     /**
      * Fill in the camera3_stream_buffer with the next valid buffer for this
@@ -203,6 +308,10 @@ class Camera3Stream :
      * For bidirectional streams, this method applies to the input-side buffers
      */
     status_t         returnInputBuffer(const camera3_stream_buffer &buffer);
+
+    // get the buffer producer of the input buffer queue.
+    // only apply to input streams.
+    status_t         getInputBufferProducer(sp<IGraphicBufferProducer> *producer);
 
     /**
      * Whether any of the stream's buffers are currently in use by the HAL,
@@ -247,8 +356,28 @@ class Camera3Stream :
     void             removeBufferListener(
             const sp<Camera3StreamBufferListener>& listener);
 
+    /**
+     * Return if the buffer queue of the stream is abandoned.
+     */
+    bool             isAbandoned() const;
+
   protected:
     const int mId;
+    /**
+     * Stream set id, used to indicate which group of this stream belongs to for buffer sharing
+     * across multiple streams.
+     *
+     * The default value is set to CAMERA3_STREAM_SET_ID_INVALID, which indicates that this stream
+     * doesn't intend to share buffers with any other streams, and this stream will fall back to
+     * the existing BufferQueue mechanism to manage the buffer allocations and buffer circulation.
+     * When a valid stream set id is set, this stream intends to use the Camera3BufferManager to
+     * manage the buffer allocations; the BufferQueue will only handle the buffer transaction
+     * between the producer and consumer. For this case, upon successfully registration, the streams
+     * with the same stream set id will potentially share the buffers allocated by
+     * Camera3BufferManager.
+     */
+    const int mSetId;
+
     const String8 mName;
     // Zero for formats with fixed buffer size for given dimensions.
     const size_t mMaxSize;
@@ -258,13 +387,17 @@ class Camera3Stream :
         STATE_CONSTRUCTED,
         STATE_IN_CONFIG,
         STATE_IN_RECONFIG,
-        STATE_CONFIGURED
+        STATE_CONFIGURED,
+        STATE_PREPARING,
+        STATE_ABANDONED
     } mState;
 
     mutable Mutex mLock;
 
     Camera3Stream(int id, camera3_stream_type type,
-            uint32_t width, uint32_t height, size_t maxSize, int format);
+            uint32_t width, uint32_t height, size_t maxSize, int format,
+            android_dataspace dataSpace, camera3_stream_rotation_t rotation,
+            int setId);
 
     /**
      * Interface to be implemented by derived classes
@@ -283,6 +416,9 @@ class Camera3Stream :
     virtual status_t returnInputBufferLocked(
             const camera3_stream_buffer &buffer);
     virtual bool     hasOutstandingBuffersLocked() const = 0;
+    // Get the buffer producer of the input buffer queue. Only apply to input streams.
+    virtual status_t getInputBufferProducerLocked(sp<IGraphicBufferProducer> *producer);
+
     // Can return -ENOTCONN when we are already disconnected (not an error)
     virtual status_t disconnectLocked() = 0;
 
@@ -303,16 +439,20 @@ class Camera3Stream :
 
     // Get the usage flags for the other endpoint, or return
     // INVALID_OPERATION if they cannot be obtained.
-    virtual status_t getEndpointUsage(uint32_t *usage) = 0;
+    virtual status_t getEndpointUsage(uint32_t *usage) const = 0;
 
     // Tracking for idle state
     wp<StatusTracker> mStatusTracker;
     // Status tracker component ID
     int mStatusId;
 
+    // Tracking for stream prepare - whether this stream can still have
+    // prepareNextBuffer called on it.
+    bool mStreamUnpreparable;
+
   private:
-    uint32_t oldUsage;
-    uint32_t oldMaxBuffers;
+    uint32_t mOldUsage;
+    uint32_t mOldMaxBuffers;
     Condition mOutputBufferReturnedSignal;
     Condition mInputBufferReturnedSignal;
     static const nsecs_t kWaitForBufferDuration = 3000000000LL; // 3000 ms
@@ -323,6 +463,30 @@ class Camera3Stream :
     void fireBufferListenersLocked(const camera3_stream_buffer& buffer,
                                   bool acquired, bool output);
     List<wp<Camera3StreamBufferListener> > mBufferListenerList;
+
+    status_t        cancelPrepareLocked();
+
+    // Return whether the buffer is in the list of outstanding buffers.
+    bool isOutstandingBuffer(const camera3_stream_buffer& buffer);
+
+    // Remove the buffer from the list of outstanding buffers.
+    void removeOutstandingBuffer(const camera3_stream_buffer& buffer);
+
+    // Tracking for PREPARING state
+
+    // State of buffer preallocation. Only true if either prepareNextBuffer
+    // has been called sufficient number of times, or stream configuration
+    // had to register buffers with the HAL
+    bool mPrepared;
+
+    Vector<camera3_stream_buffer_t> mPreparedBuffers;
+    size_t mPreparedBufferIdx;
+
+    // Number of buffers allocated on last prepare call.
+    size_t mLastMaxCount;
+
+    // Outstanding buffers dequeued from the stream's buffer queue.
+    List<buffer_handle_t> mOutstandingBuffers;
 
 }; // class Camera3Stream
 

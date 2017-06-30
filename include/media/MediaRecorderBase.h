@@ -26,10 +26,12 @@ namespace android {
 
 class ICameraRecordingProxy;
 class Surface;
+class IGraphicBufferConsumer;
 class IGraphicBufferProducer;
 
 struct MediaRecorderBase {
-    MediaRecorderBase() {}
+    MediaRecorderBase(const String16 &opPackageName)
+        : mOpPackageName(opPackageName) {}
     virtual ~MediaRecorderBase() {}
 
     virtual status_t init() = 0;
@@ -40,10 +42,9 @@ struct MediaRecorderBase {
     virtual status_t setVideoEncoder(video_encoder ve) = 0;
     virtual status_t setVideoSize(int width, int height) = 0;
     virtual status_t setVideoFrameRate(int frames_per_second) = 0;
-    virtual status_t setCamera(const sp<ICamera>& camera,
+    virtual status_t setCamera(const sp<hardware::ICamera>& camera,
                                const sp<ICameraRecordingProxy>& proxy) = 0;
     virtual status_t setPreviewSurface(const sp<IGraphicBufferProducer>& surface) = 0;
-    virtual status_t setOutputFile(const char *path) = 0;
     virtual status_t setOutputFile(int fd, int64_t offset, int64_t length) = 0;
     virtual status_t setOutputFileAuxiliary(int fd) {return INVALID_OPERATION;}
     virtual status_t setParameters(const String8& params) = 0;
@@ -52,11 +53,18 @@ struct MediaRecorderBase {
     virtual status_t prepare() = 0;
     virtual status_t start() = 0;
     virtual status_t stop() = 0;
+    virtual status_t pause() = 0;
+    virtual status_t resume() = 0;
     virtual status_t close() = 0;
     virtual status_t reset() = 0;
     virtual status_t getMaxAmplitude(int *max) = 0;
     virtual status_t dump(int fd, const Vector<String16>& args) const = 0;
+    virtual status_t setInputSurface(const sp<IGraphicBufferConsumer>& surface) = 0;
     virtual sp<IGraphicBufferProducer> querySurfaceMediaSource() const = 0;
+
+
+protected:
+    String16 mOpPackageName;
 
 private:
     MediaRecorderBase(const MediaRecorderBase &);

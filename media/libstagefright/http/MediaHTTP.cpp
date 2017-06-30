@@ -30,12 +30,11 @@
 namespace android {
 
 MediaHTTP::MediaHTTP(const sp<IMediaHTTPConnection> &conn)
-    : mInitCheck(NO_INIT),
+    : mInitCheck((conn != NULL) ? OK : NO_INIT),
       mHTTPConnection(conn),
       mCachedSizeValid(false),
       mCachedSize(0ll),
       mDrmManagerClient(NULL) {
-    mInitCheck = OK;
 }
 
 MediaHTTP::~MediaHTTP() {
@@ -54,19 +53,32 @@ status_t MediaHTTP::connect(
     if (headers != NULL) {
         extHeaders = *headers;
     }
-    extHeaders.add(String8("User-Agent"), String8(MakeUserAgent().c_str()));
 
-    bool success = mHTTPConnection->connect(uri, &extHeaders);
+    if (extHeaders.indexOfKey(String8("User-Agent")) < 0) {
+        extHeaders.add(String8("User-Agent"), String8(MakeUserAgent().c_str()));
+    }
+
+    mLastURI = uri;
+    // reconnect() calls with uri == old mLastURI.c_str(), which gets zapped
+    // as part of the above assignment. Ensure no accidental later use.
+    uri = NULL;
+
+    bool success = mHTTPConnection->connect(mLastURI.c_str(), &extHeaders);
 
     mLastHeaders = extHeaders;
-    mLastURI = uri;
 
     mCachedSizeValid = false;
+
+    if (success) {
+        AString sanitized = uriDebugString(mLastURI);
+        mName = String8::format("MediaHTTP(%s)", sanitized.c_str());
+    }
 
     return success ? OK : UNKNOWN_ERROR;
 }
 
 void MediaHTTP::disconnect() {
+    mName = String8("MediaHTTP(<disconnected>)");
     if (mInitCheck != OK) {
         return;
     }
@@ -129,7 +141,7 @@ status_t MediaHTTP::getSize(off64_t *size) {
 
     *size = mCachedSize;
 
-    return *size < 0 ? *size : OK;
+    return *size < 0 ? *size : static_cast<status_t>(OK);
 }
 
 uint32_t MediaHTTP::flags() {
@@ -171,6 +183,10 @@ void MediaHTTP::getDrmInfo(
 }
 
 String8 MediaHTTP::getUri() {
+    if (mInitCheck != OK) {
+        return String8::empty();
+    }
+
     String8 uri;
     if (OK == mHTTPConnection->getUri(&uri)) {
         return uri;

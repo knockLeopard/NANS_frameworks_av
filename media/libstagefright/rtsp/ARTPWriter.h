@@ -32,12 +32,12 @@
 namespace android {
 
 struct ABuffer;
-struct MediaBuffer;
+class MediaBuffer;
 
 struct ARTPWriter : public MediaWriter {
     ARTPWriter(int fd);
 
-    virtual status_t addSource(const sp<MediaSource> &source);
+    virtual status_t addSource(const sp<IMediaSource> &source);
     virtual bool reachedEOS();
     virtual status_t start(MetaData *params);
     virtual status_t stop();
@@ -72,7 +72,7 @@ private:
     int mRTCPFd;
 #endif
 
-    sp<MediaSource> mSource;
+    sp<IMediaSource> mSource;
     sp<ALooper> mLooper;
     sp<AHandlerReflector<ARTPWriter> > mReflector;
 

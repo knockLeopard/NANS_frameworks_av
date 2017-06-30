@@ -29,13 +29,14 @@ public:
                                 audio_channel_mask_t channelMask,
                                 size_t frameCount,
                                 void *buffer,
-                                int sessionId,
+                                audio_session_t sessionId,
                                 int uid,
-                                IAudioFlinger::track_flags_t flags,
+                                audio_input_flags_t flags,
                                 track_type type);
     virtual             ~RecordTrack();
+    virtual status_t    initCheck() const;
 
-    virtual status_t    start(AudioSystem::sync_event_t event, int triggerSession);
+    virtual status_t    start(AudioSystem::sync_event_t event, audio_session_t triggerSession);
     virtual void        stop();
 
             void        destroy();
@@ -53,6 +54,13 @@ public:
             void        handleSyncStartEvent(const sp<SyncEvent>& event);
             void        clearSyncStartEvent();
 
+            void        updateTrackFrameInfo(int64_t trackFramesReleased,
+                                             int64_t sourceFramesRead,
+                                             uint32_t halSampleRate,
+                                             const ExtendedTimestamp &timestamp);
+
+    virtual bool        isFastTrack() const { return (mFlags & AUDIO_INPUT_FLAG_FAST) != 0; }
+
 private:
     friend class AudioFlinger;  // for mState
 
@@ -60,26 +68,10 @@ private:
                         RecordTrack& operator = (const RecordTrack&);
 
     // AudioBufferProvider interface
-    virtual status_t getNextBuffer(AudioBufferProvider::Buffer* buffer,
-                                   int64_t pts = kInvalidPTS);
+    virtual status_t getNextBuffer(AudioBufferProvider::Buffer* buffer);
     // releaseBuffer() not overridden
 
     bool                mOverflow;  // overflow on most recent attempt to fill client buffer
-
-           // updated by RecordThread::readInputParameters_l()
-            AudioResampler                      *mResampler;
-
-            // interleaved stereo pairs of fixed-point Q4.27
-            int32_t                             *mRsmpOutBuffer;
-            // current allocated frame count for the above, which may be larger than needed
-            size_t                              mRsmpOutFrameCount;
-
-            size_t                              mRsmpInUnrel;   // unreleased frames remaining from
-                                                                // most recent getNextBuffer
-                                                                // for debug only
-
-            // rolling counter that is never cleared
-            int32_t                             mRsmpInFront;   // next available frame
 
             AudioBufferProvider::Buffer mSink;  // references client's buffer sink in shared memory
 
@@ -93,7 +85,11 @@ private:
             ssize_t                             mFramesToDrop;
 
             // used by resampler to find source frames
-            ResamplerBufferProvider *mResamplerBufferProvider;
+            ResamplerBufferProvider            *mResamplerBufferProvider;
+
+            // used by the record thread to convert frames to proper destination format
+            RecordBufferConverter              *mRecordBufferConverter;
+            audio_input_flags_t                mFlags;
 };
 
 // playback track, used by PatchPanel
@@ -106,12 +102,11 @@ public:
                 audio_format_t format,
                 size_t frameCount,
                 void *buffer,
-                IAudioFlinger::track_flags_t flags);
+                audio_input_flags_t flags);
     virtual             ~PatchRecord();
 
     // AudioBufferProvider interface
-    virtual status_t getNextBuffer(AudioBufferProvider::Buffer* buffer,
-                                   int64_t pts);
+    virtual status_t getNextBuffer(AudioBufferProvider::Buffer* buffer);
     virtual void releaseBuffer(AudioBufferProvider::Buffer* buffer);
 
     // PatchProxyBufferProvider interface

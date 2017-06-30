@@ -3,17 +3,6 @@ LOCAL_PATH:= $(call my-dir)
 include $(CLEAR_VARS)
 
 LOCAL_SRC_FILES := \
-    ISchedulingPolicyService.cpp \
-    SchedulingPolicyService.cpp
-
-# FIXME Move this library to frameworks/native
-LOCAL_MODULE := libscheduling_policy
-
-include $(BUILD_STATIC_LIBRARY)
-
-include $(CLEAR_VARS)
-
-LOCAL_SRC_FILES := \
     ServiceUtilities.cpp
 
 # FIXME Move this library to frameworks/native
@@ -25,6 +14,8 @@ LOCAL_SHARED_LIBRARIES := \
     liblog \
     libbinder
 
+LOCAL_CFLAGS := -Wall -Werror
+
 include $(BUILD_SHARED_LIBRARY)
 
 include $(CLEAR_VARS)
@@ -33,55 +24,67 @@ LOCAL_SRC_FILES:=               \
     AudioFlinger.cpp            \
     Threads.cpp                 \
     Tracks.cpp                  \
+    AudioHwDevice.cpp           \
+    AudioStreamOut.cpp          \
+    SpdifStreamOut.cpp          \
     Effects.cpp                 \
     AudioMixer.cpp.arm          \
-    PatchPanel.cpp
-
-LOCAL_SRC_FILES += StateQueue.cpp
+    BufferProviders.cpp         \
+    PatchPanel.cpp              \
+    StateQueue.cpp
 
 LOCAL_C_INCLUDES := \
     $(TOPDIR)frameworks/av/services/audiopolicy \
+    $(TOPDIR)external/sonic \
+    libcore/include \
     $(call include-path-for, audio-effects) \
     $(call include-path-for, audio-utils)
 
 LOCAL_SHARED_LIBRARIES := \
     libaudioresampler \
+    libaudiospdif \
     libaudioutils \
-    libcommon_time_client \
     libcutils \
     libutils \
     liblog \
     libbinder \
     libmedia \
+    libmediautils \
     libnbaio \
     libhardware \
     libhardware_legacy \
     libeffects \
     libpowermanager \
-    libserviceutility
+    libserviceutility \
+    libsonic \
+    libmediautils \
+    libmemunreachable
 
 LOCAL_STATIC_LIBRARIES := \
-    libscheduling_policy \
     libcpustats \
     libmedia_helper
 
-LOCAL_MODULE:= libaudioflinger
-LOCAL_32_BIT_ONLY := true
+LOCAL_MULTILIB := $(AUDIOSERVER_MULTILIB)
 
-LOCAL_SRC_FILES += FastMixer.cpp FastMixerState.cpp AudioWatchdog.cpp
-LOCAL_SRC_FILES += FastThread.cpp FastThreadState.cpp
-LOCAL_SRC_FILES += FastCapture.cpp FastCaptureState.cpp
+LOCAL_MODULE:= libaudioflinger
+
+LOCAL_SRC_FILES += \
+    AudioWatchdog.cpp        \
+    FastCapture.cpp          \
+    FastCaptureDumpState.cpp \
+    FastCaptureState.cpp     \
+    FastMixer.cpp            \
+    FastMixerDumpState.cpp   \
+    FastMixerState.cpp       \
+    FastThread.cpp           \
+    FastThreadDumpState.cpp  \
+    FastThreadState.cpp
 
 LOCAL_CFLAGS += -DSTATE_QUEUE_INSTANTIATIONS='"StateQueueInstantiations.cpp"'
 
-# Define ANDROID_SMP appropriately. Used to get inline tracing fast-path.
-ifeq ($(TARGET_CPU_SMP),true)
-    LOCAL_CFLAGS += -DANDROID_SMP=1
-else
-    LOCAL_CFLAGS += -DANDROID_SMP=0
-endif
-
 LOCAL_CFLAGS += -fvisibility=hidden
+
+LOCAL_CFLAGS += -Werror -Wall
 
 include $(BUILD_SHARED_LIBRARY)
 
@@ -111,6 +114,8 @@ LOCAL_MODULE:= test-resample
 
 LOCAL_MODULE_TAGS := optional
 
+LOCAL_CFLAGS := -Werror -Wall
+
 include $(BUILD_EXECUTABLE)
 
 include $(CLEAR_VARS)
@@ -130,6 +135,11 @@ LOCAL_SHARED_LIBRARIES := \
     liblog
 
 LOCAL_MODULE := libaudioresampler
+
+LOCAL_CFLAGS := -Werror -Wall
+
+# uncomment to disable NEON on architectures that actually do support NEON, for benchmarking
+#LOCAL_CFLAGS += -DUSE_NEON=false
 
 include $(BUILD_SHARED_LIBRARY)
 

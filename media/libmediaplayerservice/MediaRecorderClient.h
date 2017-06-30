@@ -29,8 +29,24 @@ class IGraphicBufferProducer;
 
 class MediaRecorderClient : public BnMediaRecorder
 {
+    class ServiceDeathNotifier: public IBinder::DeathRecipient
+    {
+    public:
+        ServiceDeathNotifier(
+                const sp<IBinder>& service,
+                const sp<IMediaRecorderClient>& listener,
+                int which);
+        virtual ~ServiceDeathNotifier();
+        virtual void binderDied(const wp<IBinder>& who);
+
+    private:
+        int mWhich;
+        sp<IBinder> mService;
+        wp<IMediaRecorderClient> mListener;
+    };
+
 public:
-    virtual     status_t   setCamera(const sp<ICamera>& camera,
+    virtual     status_t   setCamera(const sp<hardware::ICamera>& camera,
                                     const sp<ICameraRecordingProxy>& proxy);
     virtual     status_t   setPreviewSurface(const sp<IGraphicBufferProducer>& surface);
     virtual     status_t   setVideoSource(int vs);
@@ -38,7 +54,6 @@ public:
     virtual     status_t   setOutputFormat(int of);
     virtual     status_t   setVideoEncoder(int ve);
     virtual     status_t   setAudioEncoder(int ae);
-    virtual     status_t   setOutputFile(const char* path);
     virtual     status_t   setOutputFile(int fd, int64_t offset,
                                                   int64_t length);
     virtual     status_t   setVideoSize(int width, int height);
@@ -52,10 +67,13 @@ public:
     virtual     status_t   start();
     virtual     status_t   stop();
     virtual     status_t   reset();
+    virtual     status_t   pause();
+    virtual     status_t   resume();
     virtual     status_t   init();
     virtual     status_t   close();
     virtual     status_t   release();
-    virtual     status_t   dump(int fd, const Vector<String16>& args) const;
+    virtual     status_t   dump(int fd, const Vector<String16>& args);
+    virtual     status_t   setInputSurface(const sp<IGraphicBufferConsumer>& surface);
     virtual     sp<IGraphicBufferProducer> querySurfaceMediaSource();
 
 private:
@@ -63,8 +81,12 @@ private:
 
                            MediaRecorderClient(
                                    const sp<MediaPlayerService>& service,
-                                                               pid_t pid);
+                                                               pid_t pid,
+                                                               const String16& opPackageName);
     virtual                ~MediaRecorderClient();
+
+    sp<IBinder::DeathRecipient> mCameraDeathListener;
+    sp<IBinder::DeathRecipient> mCodecDeathListener;
 
     pid_t                  mPid;
     Mutex                  mLock;

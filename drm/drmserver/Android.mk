@@ -26,7 +26,8 @@ LOCAL_SHARED_LIBRARIES := \
     libutils \
     liblog \
     libbinder \
-    libdl
+    libdl \
+    libselinux
 
 LOCAL_STATIC_LIBRARIES := libdrmframeworkcommon
 
@@ -35,10 +36,14 @@ LOCAL_C_INCLUDES := \
     $(TOP)/frameworks/av/drm/libdrmframework/include \
     $(TOP)/frameworks/av/drm/libdrmframework/plugins/common/include
 
+LOCAL_CFLAGS += -Wall -Wextra -Werror
+
 LOCAL_MODULE:= drmserver
 
 LOCAL_MODULE_TAGS := optional
 
 LOCAL_32_BIT_ONLY := true
+
+LOCAL_INIT_RC := drmserver.rc
 
 include $(BUILD_EXECUTABLE)

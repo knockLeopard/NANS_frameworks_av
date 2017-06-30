@@ -19,6 +19,7 @@
 
 #include "NdkMediaDrm.h"
 
+#include <cutils/properties.h>
 #include <utils/Log.h>
 #include <utils/StrongPointer.h>
 #include <gui/Surface.h>
@@ -27,7 +28,7 @@
 #include <media/IDrmClient.h>
 #include <media/stagefright/MediaErrors.h>
 #include <binder/IServiceManager.h>
-#include <media/IMediaPlayerService.h>
+#include <media/IMediaDrmService.h>
 #include <ndk/NdkMediaCrypto.h>
 
 
@@ -148,23 +149,17 @@ static media_status_t translateStatus(status_t status) {
 
 static sp<IDrm> CreateDrm() {
     sp<IServiceManager> sm = defaultServiceManager();
+    sp<IBinder> binder = sm->getService(String16("media.drm"));
 
-    sp<IBinder> binder =
-        sm->getService(String16("media.player"));
-
-    sp<IMediaPlayerService> service =
-        interface_cast<IMediaPlayerService>(binder);
-
+    sp<IMediaDrmService> service = interface_cast<IMediaDrmService>(binder);
     if (service == NULL) {
         return NULL;
     }
 
     sp<IDrm> drm = service->makeDrm();
-
     if (drm == NULL || (drm->initCheck() != OK && drm->initCheck() != NO_INIT)) {
         return NULL;
     }
-
     return drm;
 }
 
@@ -226,8 +221,7 @@ media_status_t AMediaDrm_setOnEventListener(AMediaDrm *mObj, AMediaDrmEventListe
 
 
 static bool findId(AMediaDrm *mObj, const AMediaDrmByteArray &id, List<idvec_t>::iterator &iter) {
-    iter = mObj->mIds.begin();
-    while (iter != mObj->mIds.end()) {
+    for (iter = mObj->mIds.begin(); iter != mObj->mIds.end(); ++iter) {
         if (iter->array() == id.ptr && iter->size() == id.length) {
             return true;
         }
@@ -312,8 +306,10 @@ media_status_t AMediaDrm_getKeyRequest(AMediaDrm *mObj, const AMediaDrmScope *sc
                 String8(optionalParameters[i].mValue));
     }
     String8 defaultUrl;
+    DrmPlugin::KeyRequestType keyRequestType;
     status_t status = mObj->mDrm->getKeyRequest(*iter, mdInit, String8(mimeType),
-            mdKeyType, mdOptionalParameters, mObj->mKeyRequest, defaultUrl);
+            mdKeyType, mdOptionalParameters, mObj->mKeyRequest, defaultUrl,
+            &keyRequestType);
     if (status != OK) {
         return translateStatus(status);
     } else {
@@ -614,9 +610,9 @@ static media_status_t encrypt_decrypt_common(AMediaDrm *mObj,
 
     Vector<uint8_t> outputVec;
     if (encrypt) {
-        status_t status = mObj->mDrm->encrypt(*iter, keyIdVec, inputVec, ivVec, outputVec);
+        status = mObj->mDrm->encrypt(*iter, keyIdVec, inputVec, ivVec, outputVec);
     } else {
-        status_t status = mObj->mDrm->decrypt(*iter, keyIdVec, inputVec, ivVec, outputVec);
+        status = mObj->mDrm->decrypt(*iter, keyIdVec, inputVec, ivVec, outputVec);
     }
     if (status == OK) {
         memcpy(output, outputVec.array(), outputVec.size());
@@ -725,4 +721,3 @@ media_status_t AMediaDrm_verify(AMediaDrm *mObj, const AMediaDrmSessionId *sessi
 }
 
 } // extern "C"
-

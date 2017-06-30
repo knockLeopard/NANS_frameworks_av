@@ -19,9 +19,9 @@
 #include <utils/Log.h>
 
 #include <media/stagefright/MediaErrors.h>
-#include <utils/Errors.h>
 
 #include "CryptoPlugin.h"
+#include "SessionLibrary.h"
 
 namespace clearkeydrm {
 
@@ -33,7 +33,7 @@ using android::status_t;
 // decrypted data.  In theory, the output size can be larger than the input
 // size, but in practice this will never happen for AES-CTR.
 ssize_t CryptoPlugin::decrypt(bool secure, const KeyId keyId, const Iv iv,
-                              Mode mode, const void* srcPtr,
+                              Mode mode, const Pattern &/* pattern */, const void* srcPtr,
                               const SubSample* subSamples, size_t numSubSamples,
                               void* dstPtr, AString* errorDetailMsg) {
     if (secure) {
@@ -79,5 +79,19 @@ ssize_t CryptoPlugin::decrypt(bool secure, const KeyId keyId, const Iv iv,
         return android::ERROR_DRM_CANNOT_HANDLE;
     }
 }
+
+android::status_t CryptoPlugin::setMediaDrmSession(
+        const android::Vector<uint8_t>& sessionId) {
+    if (!sessionId.size()) {
+        mSession.clear();
+    } else {
+        mSession = SessionLibrary::get()->findSession(sessionId);
+        if (!mSession.get()) {
+            return android::ERROR_DRM_SESSION_NOT_OPENED;
+        }
+    }
+    return android::OK;
+}
+
 
 }  // namespace clearkeydrm

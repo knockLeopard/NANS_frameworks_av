@@ -25,6 +25,7 @@
 namespace android {
 
 struct ALooper;
+struct AReplyToken;
 struct AnotherPacketSource;
 struct MyHandler;
 struct SDPLoader;
@@ -42,8 +43,6 @@ struct NuPlayer::RTSPSource : public NuPlayer::Source {
     virtual void prepareAsync();
     virtual void start();
     virtual void stop();
-    virtual void pause();
-    virtual void resume();
 
     virtual status_t feedMoreTSData();
 
@@ -64,6 +63,8 @@ private:
         kWhatNotify          = 'noti',
         kWhatDisconnect      = 'disc',
         kWhatPerformSeek     = 'seek',
+        kWhatPollBuffering   = 'poll',
+        kWhatSignalEOS       = 'eos ',
     };
 
     enum State {
@@ -77,6 +78,12 @@ private:
         // Don't log any URLs.
         kFlagIncognito = 1,
     };
+
+    // Buffer Prepare/Underflow/Overflow/Resume Marks
+    static const int64_t kPrepareMarkUs;
+    static const int64_t kUnderflowMarkUs;
+    static const int64_t kOverflowMarkUs;
+    static const int64_t kStartServerMarkUs;
 
     struct TrackInfo {
         sp<AnotherPacketSource> mSource;
@@ -96,9 +103,11 @@ private:
     bool mIsSDP;
     State mState;
     status_t mFinalResult;
-    uint32_t mDisconnectReplyID;
+    sp<AReplyToken> mDisconnectReplyID;
     Mutex mBufferingLock;
     bool mBuffering;
+    bool mInPreparationPhase;
+    bool mEOSPending;
 
     sp<ALooper> mLooper;
     sp<MyHandler> mHandler;
@@ -115,6 +124,8 @@ private:
     int64_t mEOSTimeoutAudio;
     int64_t mEOSTimeoutVideo;
 
+    sp<AReplyToken> mSeekReplyID;
+
     sp<AnotherPacketSource> getSource(bool audio);
 
     void onConnected();
@@ -123,6 +134,14 @@ private:
     void finishDisconnectIfPossible();
 
     void performSeek(int64_t seekTimeUs);
+    void schedulePollBuffering();
+    void checkBuffering(
+            bool *prepared,
+            bool *underflow,
+            bool *overflow,
+            bool *startServer,
+            bool *finished);
+    void onPollBuffering();
 
     bool haveSufficientDataOnAllTracks();
 
@@ -130,6 +149,14 @@ private:
     void setError(status_t err);
     void startBufferingIfNecessary();
     bool stopBufferingIfNecessary();
+    void finishSeek(status_t err);
+
+    void postSourceEOSIfNecessary();
+    void signalSourceEOS(status_t result);
+    void onSignalEOS(const sp<AMessage> &msg);
+
+    bool sourceNearEOS(bool audio);
+    bool sourceReachedEOS(bool audio);
 
     DISALLOW_EVIL_CONSTRUCTORS(RTSPSource);
 };

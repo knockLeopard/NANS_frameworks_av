@@ -31,7 +31,7 @@ sp<IMediaDeathNotifier::DeathNotifier> IMediaDeathNotifier::sDeathNotifier;
 SortedVector< wp<IMediaDeathNotifier> > IMediaDeathNotifier::sObitRecipients;
 
 // establish binder interface to MediaPlayerService
-/*static*/const sp<IMediaPlayerService>&
+/*static*/const sp<IMediaPlayerService>
 IMediaDeathNotifier::getMediaPlayerService()
 {
     ALOGV("getMediaPlayerService");
@@ -104,8 +104,8 @@ IMediaDeathNotifier::DeathNotifier::~DeathNotifier()
     Mutex::Autolock _l(sServiceLock);
     sObitRecipients.clear();
     if (sMediaPlayerService != 0) {
-        sMediaPlayerService->asBinder()->unlinkToDeath(this);
+        IInterface::asBinder(sMediaPlayerService)->unlinkToDeath(this);
     }
 }
 
-}; // namespace android
+} // namespace android

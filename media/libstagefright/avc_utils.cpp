@@ -26,6 +26,7 @@
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MediaErrors.h>
 #include <media/stagefright/MetaData.h>
+#include <utils/misc.h>
 
 namespace android {
 
@@ -40,10 +41,37 @@ unsigned parseUE(ABitReader *br) {
     return x + (1u << numZeroes) - 1;
 }
 
+unsigned parseUEWithFallback(ABitReader *br, unsigned fallback) {
+    unsigned numZeroes = 0;
+    while (br->getBitsWithFallback(1, 1) == 0) {
+        ++numZeroes;
+    }
+    uint32_t x;
+    if (numZeroes < 32) {
+        if (br->getBitsGraceful(numZeroes, &x)) {
+            return x + (1u << numZeroes) - 1;
+        } else {
+            return fallback;
+        }
+    } else {
+        br->skipBits(numZeroes);
+        return fallback;
+    }
+}
+
 signed parseSE(ABitReader *br) {
     unsigned codeNum = parseUE(br);
 
-    return (codeNum & 1) ? (codeNum + 1) / 2 : -(codeNum / 2);
+    return (codeNum & 1) ? (codeNum + 1) / 2 : -signed(codeNum / 2);
+}
+
+signed parseSEWithFallback(ABitReader *br, signed fallback) {
+    // NOTE: parseUE cannot normally return ~0 as the max supported value is 0xFFFE
+    unsigned codeNum = parseUEWithFallback(br, ~0U);
+    if (codeNum == ~0U) {
+        return fallback;
+    }
+    return (codeNum & 1) ? (codeNum + 1) / 2 : -signed(codeNum / 2);
 }
 
 static void skipScalingList(ABitReader *br, size_t sizeOfScalingList) {
@@ -186,17 +214,31 @@ void FindAVCDimensions(
             if (aspect_ratio_idc == 255 /* extendedSAR */) {
                 sar_width = br.getBits(16);
                 sar_height = br.getBits(16);
-            } else if (aspect_ratio_idc > 0 && aspect_ratio_idc < 14) {
-                static const int32_t kFixedSARWidth[] = {
-                    1, 12, 10, 16, 40, 24, 20, 32, 80, 18, 15, 64, 160
+            } else {
+                static const struct { unsigned width, height; } kFixedSARs[] = {
+                        {   0,  0 }, // Invalid
+                        {   1,  1 },
+                        {  12, 11 },
+                        {  10, 11 },
+                        {  16, 11 },
+                        {  40, 33 },
+                        {  24, 11 },
+                        {  20, 11 },
+                        {  32, 11 },
+                        {  80, 33 },
+                        {  18, 11 },
+                        {  15, 11 },
+                        {  64, 33 },
+                        { 160, 99 },
+                        {   4,  3 },
+                        {   3,  2 },
+                        {   2,  1 },
                 };
 
-                static const int32_t kFixedSARHeight[] = {
-                    1, 11, 11, 11, 33, 11, 11, 11, 33, 11, 11, 33, 99
-                };
-
-                sar_width = kFixedSARWidth[aspect_ratio_idc - 1];
-                sar_height = kFixedSARHeight[aspect_ratio_idc - 1];
+                if (aspect_ratio_idc > 0 && aspect_ratio_idc < NELEM(kFixedSARs)) {
+                    sar_width = kFixedSARs[aspect_ratio_idc].width;
+                    sar_height = kFixedSARs[aspect_ratio_idc].height;
+                }
             }
         }
 
@@ -414,7 +456,10 @@ bool IsIDR(const sp<ABuffer> &buffer) {
     const uint8_t *nalStart;
     size_t nalSize;
     while (getNextNALUnit(&data, &size, &nalStart, &nalSize, true) == OK) {
-        CHECK_GT(nalSize, 0u);
+        if (nalSize == 0u) {
+            ALOGW("skipping empty nal unit from potentially malformed bitstream");
+            continue;
+        }
 
         unsigned nalType = nalStart[0] & 0x1f;
 
@@ -447,6 +492,28 @@ bool IsAVCReferenceFrame(const sp<ABuffer> &accessUnit) {
     }
 
     return true;
+}
+
+uint32_t FindAVCLayerId(const uint8_t *data, size_t size) {
+    CHECK(data != NULL);
+
+    const unsigned kSvcNalType = 0xE;
+    const unsigned kSvcNalSearchRange = 32;
+    // SVC NAL
+    // |---0 1110|1--- ----|---- ----|iii- ---|
+    //       ^                        ^
+    //   NAL-type = 0xE               layer-Id
+    //
+    // layer_id 0 is for base layer, while 1, 2, ... are enhancement layers.
+    // Layer n uses reference frames from layer 0, 1, ..., n-1.
+
+    uint32_t layerId = 0;
+    sp<ABuffer> svcNAL = FindNAL(
+            data, size > kSvcNalSearchRange ? kSvcNalSearchRange : size, kSvcNalType);
+    if (svcNAL != NULL && svcNAL->size() >= 4) {
+        layerId = (*(svcNAL->data() + 3) >> 5) & 0x7;
+    }
+    return layerId;
 }
 
 sp<MetaData> MakeAACCodecSpecificData(
@@ -505,8 +572,8 @@ bool ExtractDimensionsFromVOLHeader(
     CHECK_NE(video_object_type_indication,
              0x21u /* Fine Granularity Scalable */);
 
-    unsigned video_object_layer_verid;
-    unsigned video_object_layer_priority;
+    unsigned video_object_layer_verid __unused;
+    unsigned video_object_layer_priority __unused;
     if (br.getBits(1)) {
         video_object_layer_verid = br.getBits(4);
         video_object_layer_priority = br.getBits(3);
@@ -568,7 +635,7 @@ bool ExtractDimensionsFromVOLHeader(
     unsigned video_object_layer_height = br.getBits(13);
     CHECK(br.getBits(1));  // marker_bit
 
-    unsigned interlaced = br.getBits(1);
+    unsigned interlaced __unused = br.getBits(1);
 
     *width = video_object_layer_width;
     *height = video_object_layer_height;
@@ -614,7 +681,7 @@ bool GetMPEGAudioFrameSize(
         return false;
     }
 
-    unsigned protection = (header >> 16) & 1;
+    unsigned protection __unused = (header >> 16) & 1;
 
     unsigned bitrate_index = (header >> 12) & 0x0f;
 

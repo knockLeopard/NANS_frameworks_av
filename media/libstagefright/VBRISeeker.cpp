@@ -83,8 +83,23 @@ sp<VBRISeeker> VBRISeeker::CreateFromSource(
          scale,
          entrySize);
 
+    if (entrySize > 4) {
+        ALOGE("invalid VBRI entry size: %zu", entrySize);
+        return NULL;
+    }
+
+    sp<VBRISeeker> seeker = new (std::nothrow) VBRISeeker;
+    if (seeker == NULL) {
+        ALOGW("Couldn't allocate VBRISeeker");
+        return NULL;
+    }
+
     size_t totalEntrySize = numEntries * entrySize;
-    uint8_t *buffer = new uint8_t[totalEntrySize];
+    uint8_t *buffer = new (std::nothrow) uint8_t[totalEntrySize];
+    if (!buffer) {
+        ALOGW("Couldn't allocate %zu bytes", totalEntrySize);
+        return NULL;
+    }
 
     n = source->readAt(pos + sizeof(vbriHeader), buffer, totalEntrySize);
     if (n < (ssize_t)totalEntrySize) {
@@ -94,7 +109,6 @@ sp<VBRISeeker> VBRISeeker::CreateFromSource(
         return NULL;
     }
 
-    sp<VBRISeeker> seeker = new VBRISeeker;
     seeker->mBasePos = post_id3_pos + frameSize;
     // only update mDurationUs if the calculated duration is valid (non zero)
     // otherwise, leave duration at -1 so that getDuration() and getOffsetForTime()
@@ -122,7 +136,7 @@ sp<VBRISeeker> VBRISeeker::CreateFromSource(
 
         seeker->mSegments.push(numBytes);
 
-        ALOGV("entry #%zu: %u offset 0x%016llx", i, numBytes, offset);
+        ALOGV("entry #%zu: %u offset %#016llx", i, numBytes, (long long)offset);
         offset += numBytes;
     }
 
@@ -149,7 +163,7 @@ bool VBRISeeker::getDuration(int64_t *durationUs) {
 }
 
 bool VBRISeeker::getOffsetForTime(int64_t *timeUs, off64_t *pos) {
-    if (mDurationUs < 0) {
+    if (mDurationUs < 0 || mSegments.size() == 0) {
         return false;
     }
 
@@ -163,7 +177,7 @@ bool VBRISeeker::getOffsetForTime(int64_t *timeUs, off64_t *pos) {
         *pos += mSegments.itemAt(segmentIndex++);
     }
 
-    ALOGV("getOffsetForTime %" PRId64 " us => 0x%016llx", *timeUs, *pos);
+    ALOGV("getOffsetForTime %lld us => 0x%016llx", (long long)*timeUs, (long long)*pos);
 
     *timeUs = nowUs;
 

@@ -58,13 +58,15 @@ public:
         }
         Parcel data, reply;
         data.writeInterfaceToken(ISoundTrigger::getInterfaceDescriptor());
-        data.writeStrongBinder(modelMemory->asBinder());
+        data.writeStrongBinder(IInterface::asBinder(modelMemory));
         status_t status = remote()->transact(LOAD_SOUND_MODEL, data, &reply);
-        if (status != NO_ERROR ||
-                (status = (status_t)reply.readInt32()) != NO_ERROR) {
+        if (status != NO_ERROR) {
             return status;
         }
-        reply.read(handle, sizeof(sound_model_handle_t));
+        status = (status_t)reply.readInt32();
+        if (status == NO_ERROR) {
+            reply.read(handle, sizeof(sound_model_handle_t));
+        }
         return status;
     }
 
@@ -74,7 +76,7 @@ public:
         data.writeInterfaceToken(ISoundTrigger::getInterfaceDescriptor());
         data.write(&handle, sizeof(sound_model_handle_t));
         status_t status = remote()->transact(UNLOAD_SOUND_MODEL, data, &reply);
-        if (status != NO_ERROR) {
+        if (status == NO_ERROR) {
             status = (status_t)reply.readInt32();
         }
         return status;
@@ -91,9 +93,9 @@ public:
         } else {
             data.writeInt32(dataMemory->size());
         }
-        data.writeStrongBinder(dataMemory->asBinder());
+        data.writeStrongBinder(IInterface::asBinder(dataMemory));
         status_t status = remote()->transact(START_RECOGNITION, data, &reply);
-        if (status != NO_ERROR) {
+        if (status == NO_ERROR) {
             status = (status_t)reply.readInt32();
         }
         return status;
@@ -105,7 +107,7 @@ public:
         data.writeInterfaceToken(ISoundTrigger::getInterfaceDescriptor());
         data.write(&handle, sizeof(sound_model_handle_t));
         status_t status = remote()->transact(STOP_RECOGNITION, data, &reply);
-        if (status != NO_ERROR) {
+        if (status == NO_ERROR) {
             status = (status_t)reply.readInt32();
         }
         return status;

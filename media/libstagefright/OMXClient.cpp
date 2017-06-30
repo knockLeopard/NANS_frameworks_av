@@ -25,19 +25,29 @@
 
 #include <binder/IServiceManager.h>
 #include <media/IMediaPlayerService.h>
+#include <media/IMediaCodecService.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/OMXClient.h>
+#include <cutils/properties.h>
 #include <utils/KeyedVector.h>
 
 #include "include/OMX.h"
 
 namespace android {
 
+static bool sCodecProcessEnabled = true;
+
 struct MuxOMX : public IOMX {
-    MuxOMX(const sp<IOMX> &remoteOMX);
+    MuxOMX(const sp<IOMX> &mediaServerOMX, const sp<IOMX> &mediaCodecOMX);
     virtual ~MuxOMX();
 
-    virtual IBinder *onAsBinder() { return mRemoteOMX->asBinder().get(); }
+    // Nobody should be calling this. In case someone does anyway, just
+    // return the media server IOMX.
+    // TODO: return NULL
+    virtual IBinder *onAsBinder() {
+        ALOGE("MuxOMX::onAsBinder should not be called");
+        return IInterface::asBinder(mMediaServerOMX).get();
+    }
 
     virtual bool livesLocally(node_id node, pid_t pid);
 
@@ -45,6 +55,7 @@ struct MuxOMX : public IOMX {
 
     virtual status_t allocateNode(
             const char *name, const sp<IOMXObserver> &observer,
+            sp<IBinder> *nodeBinder,
             node_id *node);
 
     virtual status_t freeNode(node_id node);
@@ -72,7 +83,7 @@ struct MuxOMX : public IOMX {
             node_id node, OMX_STATETYPE* state);
 
     virtual status_t storeMetaDataInBuffers(
-            node_id node, OMX_U32 port_index, OMX_BOOL enable);
+            node_id node, OMX_U32 port_index, OMX_BOOL enable, MetadataBufferType *type);
 
     virtual status_t prepareForAdaptivePlayback(
             node_id node, OMX_U32 port_index, OMX_BOOL enable,
@@ -82,15 +93,15 @@ struct MuxOMX : public IOMX {
             node_id node, OMX_U32 portIndex, OMX_BOOL tunneled,
             OMX_U32 audioHwSync, native_handle_t **sidebandHandle);
 
-    virtual status_t enableGraphicBuffers(
-            node_id node, OMX_U32 port_index, OMX_BOOL enable);
+    virtual status_t enableNativeBuffers(
+            node_id node, OMX_U32 port_index, OMX_BOOL graphic, OMX_BOOL enable);
 
     virtual status_t getGraphicBufferUsage(
             node_id node, OMX_U32 port_index, OMX_U32* usage);
 
     virtual status_t useBuffer(
             node_id node, OMX_U32 port_index, const sp<IMemory> &params,
-            buffer_id *buffer);
+            buffer_id *buffer, OMX_U32 allottedSize);
 
     virtual status_t useGraphicBuffer(
             node_id node, OMX_U32 port_index,
@@ -100,30 +111,42 @@ struct MuxOMX : public IOMX {
             node_id node, OMX_U32 port_index,
             const sp<GraphicBuffer> &graphicBuffer, buffer_id buffer);
 
-    virtual status_t createInputSurface(
+    virtual status_t updateNativeHandleInMeta(
             node_id node, OMX_U32 port_index,
-            sp<IGraphicBufferProducer> *bufferProducer);
+            const sp<NativeHandle> &nativeHandle, buffer_id buffer);
+
+    virtual status_t createInputSurface(
+            node_id node, OMX_U32 port_index, android_dataspace dataSpace,
+            sp<IGraphicBufferProducer> *bufferProducer, MetadataBufferType *type);
+
+    virtual status_t createPersistentInputSurface(
+            sp<IGraphicBufferProducer> *bufferProducer,
+            sp<IGraphicBufferConsumer> *bufferConsumer);
+
+    virtual status_t setInputSurface(
+            node_id node, OMX_U32 port_index,
+            const sp<IGraphicBufferConsumer> &bufferConsumer, MetadataBufferType *type);
 
     virtual status_t signalEndOfInputStream(node_id node);
 
-    virtual status_t allocateBuffer(
+    virtual status_t allocateSecureBuffer(
             node_id node, OMX_U32 port_index, size_t size,
-            buffer_id *buffer, void **buffer_data);
+            buffer_id *buffer, void **buffer_data, sp<NativeHandle> *native_handle);
 
     virtual status_t allocateBufferWithBackup(
             node_id node, OMX_U32 port_index, const sp<IMemory> &params,
-            buffer_id *buffer);
+            buffer_id *buffer, OMX_U32 allottedSize);
 
     virtual status_t freeBuffer(
             node_id node, OMX_U32 port_index, buffer_id buffer);
 
-    virtual status_t fillBuffer(node_id node, buffer_id buffer);
+    virtual status_t fillBuffer(node_id node, buffer_id buffer, int fenceFd);
 
     virtual status_t emptyBuffer(
             node_id node,
             buffer_id buffer,
             OMX_U32 range_offset, OMX_U32 range_length,
-            OMX_U32 flags, OMX_TICKS timestamp);
+            OMX_U32 flags, OMX_TICKS timestamp, int fenceFd);
 
     virtual status_t getExtensionIndex(
             node_id node,
@@ -140,23 +163,32 @@ struct MuxOMX : public IOMX {
 private:
     mutable Mutex mLock;
 
-    sp<IOMX> mRemoteOMX;
+    sp<IOMX> mMediaServerOMX;
+    sp<IOMX> mMediaCodecOMX;
     sp<IOMX> mLocalOMX;
 
-    KeyedVector<node_id, bool> mIsLocalNode;
+    typedef enum {
+        LOCAL,
+        MEDIAPROCESS,
+        CODECPROCESS
+    } node_location;
+
+    KeyedVector<node_id, node_location> mNodeLocation;
 
     bool isLocalNode(node_id node) const;
     bool isLocalNode_l(node_id node) const;
     const sp<IOMX> &getOMX(node_id node) const;
     const sp<IOMX> &getOMX_l(node_id node) const;
 
-    static bool CanLiveLocally(const char *name);
+    static node_location getPreferredCodecLocation(const char *name);
 
     DISALLOW_EVIL_CONSTRUCTORS(MuxOMX);
 };
 
-MuxOMX::MuxOMX(const sp<IOMX> &remoteOMX)
-    : mRemoteOMX(remoteOMX) {
+MuxOMX::MuxOMX(const sp<IOMX> &mediaServerOMX, const sp<IOMX> &mediaCodecOMX)
+    : mMediaServerOMX(mediaServerOMX),
+      mMediaCodecOMX(mediaCodecOMX) {
+    ALOGI("MuxOMX ctor");
 }
 
 MuxOMX::~MuxOMX() {
@@ -169,27 +201,55 @@ bool MuxOMX::isLocalNode(node_id node) const {
 }
 
 bool MuxOMX::isLocalNode_l(node_id node) const {
-    return mIsLocalNode.indexOfKey(node) >= 0;
+    return mNodeLocation.valueFor(node) == LOCAL;
 }
 
 // static
-bool MuxOMX::CanLiveLocally(const char *name) {
+MuxOMX::node_location MuxOMX::getPreferredCodecLocation(const char *name) {
+    if (sCodecProcessEnabled) {
+        // all codecs go to codec process unless excluded using system property, in which case
+        // all non-secure decoders, OMX.google.* codecs and encoders can go in the codec process
+        // (non-OMX.google.* encoders can be excluded using system property.)
+        if ((strcasestr(name, "decoder")
+                        && strcasestr(name, ".secure") != name + strlen(name) - 7)
+                || (strcasestr(name, "encoder")
+                        && !property_get_bool("media.stagefright.legacyencoder", false))
+                || !property_get_bool("media.stagefright.less-secure", false)
+                || !strncasecmp(name, "OMX.google.", 11)) {
+            return CODECPROCESS;
+        }
+        // everything else runs in the media server
+        return MEDIAPROCESS;
+    } else {
 #ifdef __LP64__
-    (void)name; // disable unused parameter warning
-    // 64 bit processes always run OMX remote on MediaServer
-    return false;
+        // 64 bit processes always run OMX remote on MediaServer
+        return MEDIAPROCESS;
 #else
-    // 32 bit processes run only OMX.google.* components locally
-    return !strncasecmp(name, "OMX.google.", 11);
+        // 32 bit processes run only OMX.google.* components locally
+        if (!strncasecmp(name, "OMX.google.", 11)) {
+            return LOCAL;
+        }
+        return MEDIAPROCESS;
 #endif
+    }
 }
 
 const sp<IOMX> &MuxOMX::getOMX(node_id node) const {
-    return isLocalNode(node) ? mLocalOMX : mRemoteOMX;
+    Mutex::Autolock autoLock(mLock);
+    return getOMX_l(node);
 }
 
 const sp<IOMX> &MuxOMX::getOMX_l(node_id node) const {
-    return isLocalNode_l(node) ? mLocalOMX : mRemoteOMX;
+    node_location loc = mNodeLocation.valueFor(node);
+    if (loc == LOCAL) {
+        return mLocalOMX;
+    } else if (loc == MEDIAPROCESS) {
+        return mMediaServerOMX;
+    } else if (loc == CODECPROCESS) {
+        return mMediaCodecOMX;
+    }
+    ALOGE("Couldn't determine node location for node %d: %d, using local", node, loc);
+    return mLocalOMX;
 }
 
 bool MuxOMX::livesLocally(node_id node, pid_t pid) {
@@ -208,29 +268,34 @@ status_t MuxOMX::listNodes(List<ComponentInfo> *list) {
 
 status_t MuxOMX::allocateNode(
         const char *name, const sp<IOMXObserver> &observer,
+        sp<IBinder> *nodeBinder,
         node_id *node) {
     Mutex::Autolock autoLock(mLock);
 
     sp<IOMX> omx;
 
-    if (CanLiveLocally(name)) {
+    node_location loc = getPreferredCodecLocation(name);
+    if (loc == CODECPROCESS) {
+        omx = mMediaCodecOMX;
+    } else if (loc == MEDIAPROCESS) {
+        omx = mMediaServerOMX;
+    } else {
         if (mLocalOMX == NULL) {
             mLocalOMX = new OMX;
         }
         omx = mLocalOMX;
-    } else {
-        omx = mRemoteOMX;
     }
 
-    status_t err = omx->allocateNode(name, observer, node);
+    status_t err = omx->allocateNode(name, observer, nodeBinder, node);
+    ALOGV("allocated node_id %x on %s OMX", *node, omx == mMediaCodecOMX ? "codecprocess" :
+            omx == mMediaServerOMX ? "mediaserver" : "local");
+
 
     if (err != OK) {
         return err;
     }
 
-    if (omx == mLocalOMX) {
-        mIsLocalNode.add(*node, true);
-    }
+    mNodeLocation.add(*node, loc);
 
     return OK;
 }
@@ -238,13 +303,19 @@ status_t MuxOMX::allocateNode(
 status_t MuxOMX::freeNode(node_id node) {
     Mutex::Autolock autoLock(mLock);
 
+    // exit if we have already freed the node
+    if (mNodeLocation.indexOfKey(node) < 0) {
+        ALOGD("MuxOMX::freeNode: node %d seems to be released already --- ignoring.", node);
+        return OK;
+    }
+
     status_t err = getOMX_l(node)->freeNode(node);
 
     if (err != OK) {
         return err;
     }
 
-    mIsLocalNode.removeItem(node);
+    mNodeLocation.removeItem(node);
 
     return OK;
 }
@@ -284,8 +355,8 @@ status_t MuxOMX::getState(
 }
 
 status_t MuxOMX::storeMetaDataInBuffers(
-        node_id node, OMX_U32 port_index, OMX_BOOL enable) {
-    return getOMX(node)->storeMetaDataInBuffers(node, port_index, enable);
+        node_id node, OMX_U32 port_index, OMX_BOOL enable, MetadataBufferType *type) {
+    return getOMX(node)->storeMetaDataInBuffers(node, port_index, enable, type);
 }
 
 status_t MuxOMX::prepareForAdaptivePlayback(
@@ -302,9 +373,9 @@ status_t MuxOMX::configureVideoTunnelMode(
             node, portIndex, enable, audioHwSync, sidebandHandle);
 }
 
-status_t MuxOMX::enableGraphicBuffers(
-        node_id node, OMX_U32 port_index, OMX_BOOL enable) {
-    return getOMX(node)->enableGraphicBuffers(node, port_index, enable);
+status_t MuxOMX::enableNativeBuffers(
+        node_id node, OMX_U32 port_index, OMX_BOOL graphic, OMX_BOOL enable) {
+    return getOMX(node)->enableNativeBuffers(node, port_index, graphic, enable);
 }
 
 status_t MuxOMX::getGraphicBufferUsage(
@@ -314,8 +385,8 @@ status_t MuxOMX::getGraphicBufferUsage(
 
 status_t MuxOMX::useBuffer(
         node_id node, OMX_U32 port_index, const sp<IMemory> &params,
-        buffer_id *buffer) {
-    return getOMX(node)->useBuffer(node, port_index, params, buffer);
+        buffer_id *buffer, OMX_U32 allottedSize) {
+    return getOMX(node)->useBuffer(node, port_index, params, buffer, allottedSize);
 }
 
 status_t MuxOMX::useGraphicBuffer(
@@ -332,30 +403,59 @@ status_t MuxOMX::updateGraphicBufferInMeta(
             node, port_index, graphicBuffer, buffer);
 }
 
-status_t MuxOMX::createInputSurface(
+status_t MuxOMX::updateNativeHandleInMeta(
         node_id node, OMX_U32 port_index,
-        sp<IGraphicBufferProducer> *bufferProducer) {
+        const sp<NativeHandle> &nativeHandle, buffer_id buffer) {
+    return getOMX(node)->updateNativeHandleInMeta(
+            node, port_index, nativeHandle, buffer);
+}
+
+status_t MuxOMX::createInputSurface(
+        node_id node, OMX_U32 port_index, android_dataspace dataSpace,
+        sp<IGraphicBufferProducer> *bufferProducer, MetadataBufferType *type) {
     status_t err = getOMX(node)->createInputSurface(
-            node, port_index, bufferProducer);
+            node, port_index, dataSpace, bufferProducer, type);
     return err;
+}
+
+status_t MuxOMX::createPersistentInputSurface(
+        sp<IGraphicBufferProducer> *bufferProducer,
+        sp<IGraphicBufferConsumer> *bufferConsumer) {
+    sp<IOMX> omx;
+    {
+        Mutex::Autolock autoLock(mLock);
+        if (property_get_bool("media.stagefright.legacyencoder", false)) {
+            omx = mMediaServerOMX;
+        } else {
+            omx = mMediaCodecOMX;
+        }
+    }
+    return omx->createPersistentInputSurface(
+            bufferProducer, bufferConsumer);
+}
+
+status_t MuxOMX::setInputSurface(
+        node_id node, OMX_U32 port_index,
+        const sp<IGraphicBufferConsumer> &bufferConsumer, MetadataBufferType *type) {
+    return getOMX(node)->setInputSurface(node, port_index, bufferConsumer, type);
 }
 
 status_t MuxOMX::signalEndOfInputStream(node_id node) {
     return getOMX(node)->signalEndOfInputStream(node);
 }
 
-status_t MuxOMX::allocateBuffer(
+status_t MuxOMX::allocateSecureBuffer(
         node_id node, OMX_U32 port_index, size_t size,
-        buffer_id *buffer, void **buffer_data) {
-    return getOMX(node)->allocateBuffer(
-            node, port_index, size, buffer, buffer_data);
+        buffer_id *buffer, void **buffer_data, sp<NativeHandle> *native_handle) {
+    return getOMX(node)->allocateSecureBuffer(
+            node, port_index, size, buffer, buffer_data, native_handle);
 }
 
 status_t MuxOMX::allocateBufferWithBackup(
         node_id node, OMX_U32 port_index, const sp<IMemory> &params,
-        buffer_id *buffer) {
+        buffer_id *buffer, OMX_U32 allottedSize) {
     return getOMX(node)->allocateBufferWithBackup(
-            node, port_index, params, buffer);
+            node, port_index, params, buffer, allottedSize);
 }
 
 status_t MuxOMX::freeBuffer(
@@ -363,17 +463,17 @@ status_t MuxOMX::freeBuffer(
     return getOMX(node)->freeBuffer(node, port_index, buffer);
 }
 
-status_t MuxOMX::fillBuffer(node_id node, buffer_id buffer) {
-    return getOMX(node)->fillBuffer(node, buffer);
+status_t MuxOMX::fillBuffer(node_id node, buffer_id buffer, int fenceFd) {
+    return getOMX(node)->fillBuffer(node, buffer, fenceFd);
 }
 
 status_t MuxOMX::emptyBuffer(
         node_id node,
         buffer_id buffer,
         OMX_U32 range_offset, OMX_U32 range_length,
-        OMX_U32 flags, OMX_TICKS timestamp) {
+        OMX_U32 flags, OMX_TICKS timestamp, int fenceFd) {
     return getOMX(node)->emptyBuffer(
-            node, buffer, range_offset, range_length, flags, timestamp);
+            node, buffer, range_offset, range_length, flags, timestamp, fenceFd);
 }
 
 status_t MuxOMX::getExtensionIndex(
@@ -393,22 +493,52 @@ status_t MuxOMX::setInternalOption(
 }
 
 OMXClient::OMXClient() {
+    char value[PROPERTY_VALUE_MAX];
+    if (property_get("media.stagefright.codecremote", value, NULL)
+            && (!strcmp("0", value) || !strcasecmp("false", value))) {
+        sCodecProcessEnabled = false;
+    }
 }
 
 status_t OMXClient::connect() {
     sp<IServiceManager> sm = defaultServiceManager();
-    sp<IBinder> binder = sm->getService(String16("media.player"));
-    sp<IMediaPlayerService> service = interface_cast<IMediaPlayerService>(binder);
+    sp<IBinder> playerbinder = sm->getService(String16("media.player"));
+    sp<IMediaPlayerService> mediaservice = interface_cast<IMediaPlayerService>(playerbinder);
 
-    CHECK(service.get() != NULL);
-
-    mOMX = service->getOMX();
-    CHECK(mOMX.get() != NULL);
-
-    if (!mOMX->livesLocally(0 /* node */, getpid())) {
-        ALOGI("Using client-side OMX mux.");
-        mOMX = new MuxOMX(mOMX);
+    if (mediaservice.get() == NULL) {
+        ALOGE("Cannot obtain IMediaPlayerService");
+        return NO_INIT;
     }
+
+    sp<IOMX> mediaServerOMX = mediaservice->getOMX();
+    if (mediaServerOMX.get() == NULL) {
+        ALOGE("Cannot obtain mediaserver IOMX");
+        return NO_INIT;
+    }
+
+    // If we don't want to use the codec process, and the media server OMX
+    // is local, use it directly instead of going through MuxOMX
+    if (!sCodecProcessEnabled &&
+            mediaServerOMX->livesLocally(0 /* node */, getpid())) {
+        mOMX = mediaServerOMX;
+        return OK;
+    }
+
+    sp<IBinder> codecbinder = sm->getService(String16("media.codec"));
+    sp<IMediaCodecService> codecservice = interface_cast<IMediaCodecService>(codecbinder);
+
+    if (codecservice.get() == NULL) {
+        ALOGE("Cannot obtain IMediaCodecService");
+        return NO_INIT;
+    }
+
+    sp<IOMX> mediaCodecOMX = codecservice->getOMX();
+    if (mediaCodecOMX.get() == NULL) {
+        ALOGE("Cannot obtain mediacodec IOMX");
+        return NO_INIT;
+    }
+
+    mOMX = new MuxOMX(mediaServerOMX, mediaCodecOMX);
 
     return OK;
 }

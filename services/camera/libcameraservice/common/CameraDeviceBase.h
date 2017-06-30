@@ -24,11 +24,14 @@
 #include <utils/Timers.h>
 #include <utils/List.h>
 
-#include <camera/camera2/ICameraDeviceCallbacks.h>
 #include "hardware/camera2.h"
 #include "hardware/camera3.h"
 #include "camera/CameraMetadata.h"
 #include "camera/CaptureResult.h"
+#include "common/CameraModule.h"
+#include "gui/IGraphicBufferProducer.h"
+#include "device3/Camera3StreamInterface.h"
+#include "binder/Status.h"
 
 namespace android {
 
@@ -45,7 +48,7 @@ class CameraDeviceBase : public virtual RefBase {
      */
     virtual int      getId() const = 0;
 
-    virtual status_t initialize(camera_module_t *module) = 0;
+    virtual status_t initialize(CameraModule *module) = 0;
     virtual status_t disconnect() = 0;
 
     virtual status_t dump(int fd, const Vector<String16> &args) = 0;
@@ -99,17 +102,24 @@ class CameraDeviceBase : public virtual RefBase {
             nsecs_t timeout) = 0;
 
     /**
-     * Create an output stream of the requested size and format.
+     * Create an output stream of the requested size, format, rotation and dataspace
      *
-     * If format is CAMERA2_HAL_PIXEL_FORMAT_OPAQUE, then the HAL device selects
-     * an appropriate format; it can be queried with getStreamInfo.
-     *
-     * If format is HAL_PIXEL_FORMAT_COMPRESSED, the size parameter must be
-     * equal to the size in bytes of the buffers to allocate for the stream. For
-     * other formats, the size parameter is ignored.
+     * For HAL_PIXEL_FORMAT_BLOB formats, the width and height should be the
+     * logical dimensions of the buffer, not the number of bytes.
      */
-    virtual status_t createStream(sp<ANativeWindow> consumer,
-            uint32_t width, uint32_t height, int format, int *id) = 0;
+    virtual status_t createStream(sp<Surface> consumer,
+            uint32_t width, uint32_t height, int format,
+            android_dataspace dataSpace, camera3_stream_rotation_t rotation, int *id,
+            int streamSetId = camera3::CAMERA3_STREAM_SET_ID_INVALID,
+            uint32_t consumerUsage = 0) = 0;
+
+    /**
+     * Create an input stream of width, height, and format.
+     *
+     * Return value is the stream ID if non-negative and an error if negative.
+     */
+    virtual status_t createInputStream(uint32_t width, uint32_t height,
+            int32_t format, /*out*/ int32_t *id) = 0;
 
     /**
      * Create an input reprocess stream that uses buffers from an existing
@@ -121,7 +131,8 @@ class CameraDeviceBase : public virtual RefBase {
      * Get information about a given stream.
      */
     virtual status_t getStreamInfo(int id,
-            uint32_t *width, uint32_t *height, uint32_t *format) = 0;
+            uint32_t *width, uint32_t *height,
+            uint32_t *format, android_dataspace *dataSpace) = 0;
 
     /**
      * Set stream gralloc buffer transform
@@ -150,7 +161,11 @@ class CameraDeviceBase : public virtual RefBase {
      * - BAD_VALUE if the set of streams was invalid (e.g. fmts or sizes)
      * - INVALID_OPERATION if the device was in the wrong state
      */
-    virtual status_t configureStreams() = 0;
+    virtual status_t configureStreams(bool isConstrainedHighSpeed = false) = 0;
+
+    // get the buffer producer of the input stream
+    virtual status_t getInputBufferProducer(
+            sp<IGraphicBufferProducer> *producer) = 0;
 
     /**
      * Create a metadata buffer with fields that the HAL device believes are
@@ -175,25 +190,27 @@ class CameraDeviceBase : public virtual RefBase {
     /**
      * Abstract class for HAL notification listeners
      */
-    class NotificationListener {
+    class NotificationListener : public virtual RefBase {
       public:
         // The set of notifications is a merge of the notifications required for
         // API1 and API2.
 
         // Required for API 1 and 2
-        virtual void notifyError(ICameraDeviceCallbacks::CameraErrorCode errorCode,
+        virtual void notifyError(int32_t errorCode,
                                  const CaptureResultExtras &resultExtras) = 0;
 
         // Required only for API2
         virtual void notifyIdle() = 0;
         virtual void notifyShutter(const CaptureResultExtras &resultExtras,
                 nsecs_t timestamp) = 0;
+        virtual void notifyPrepared(int streamId) = 0;
 
         // Required only for API1
         virtual void notifyAutoFocus(uint8_t newState, int triggerId) = 0;
         virtual void notifyAutoExposure(uint8_t newState, int triggerId) = 0;
         virtual void notifyAutoWhitebalance(uint8_t newState,
                 int triggerId) = 0;
+        virtual void notifyRepeatingRequestError(long lastFrameNumber) = 0;
       protected:
         virtual ~NotificationListener();
     };
@@ -202,7 +219,7 @@ class CameraDeviceBase : public virtual RefBase {
      * Connect HAL notifications to a listener. Overwrites previous
      * listener. Set to NULL to stop receiving notifications.
      */
-    virtual status_t setNotifyCallback(NotificationListener *listener) = 0;
+    virtual status_t setNotifyCallback(wp<NotificationListener> listener) = 0;
 
     /**
      * Whether the device supports calling notifyAutofocus, notifyAutoExposure,
@@ -270,9 +287,38 @@ class CameraDeviceBase : public virtual RefBase {
     virtual status_t flush(int64_t *lastFrameNumber = NULL) = 0;
 
     /**
+     * Prepare stream by preallocating buffers for it asynchronously.
+     * Calls notifyPrepared() once allocation is complete.
+     */
+    virtual status_t prepare(int streamId) = 0;
+
+    /**
+     * Free stream resources by dumping its unused gralloc buffers.
+     */
+    virtual status_t tearDown(int streamId) = 0;
+
+    /**
+     * Add buffer listener for a particular stream in the device.
+     */
+    virtual status_t addBufferListenerForStream(int streamId,
+            wp<camera3::Camera3StreamBufferListener> listener) = 0;
+
+    /**
+     * Prepare stream by preallocating up to maxCount buffers for it asynchronously.
+     * Calls notifyPrepared() once allocation is complete.
+     */
+    virtual status_t prepare(int maxCount, int streamId) = 0;
+
+    /**
      * Get the HAL device version.
      */
     virtual uint32_t getDeviceVersion() = 0;
+
+    /**
+     * Set the deferred consumer surface and finish the rest of the stream configuration.
+     */
+    virtual status_t setConsumerSurface(int streamId, sp<Surface> consumer) = 0;
+
 };
 
 }; // namespace android

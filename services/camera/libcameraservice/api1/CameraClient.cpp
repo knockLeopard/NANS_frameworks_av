@@ -19,6 +19,7 @@
 
 #include <cutils/properties.h>
 #include <gui/Surface.h>
+#include <media/hardware/HardwareAPI.h>
 
 #include "api1/CameraClient.h"
 #include "device1/CameraHardwareInterface.h"
@@ -34,7 +35,7 @@ static int getCallingPid() {
 }
 
 CameraClient::CameraClient(const sp<CameraService>& cameraService,
-        const sp<ICameraClient>& cameraClient,
+        const sp<hardware::ICameraClient>& cameraClient,
         const String16& clientPackageName,
         int cameraId, int cameraFacing,
         int clientPid, int clientUid,
@@ -59,7 +60,7 @@ CameraClient::CameraClient(const sp<CameraService>& cameraService,
     LOG1("CameraClient::CameraClient X (pid %d, id %d)", callingPid, cameraId);
 }
 
-status_t CameraClient::initialize(camera_module_t *module) {
+status_t CameraClient::initialize(CameraModule *module) {
     int callingPid = getCallingPid();
     status_t res;
 
@@ -75,7 +76,7 @@ status_t CameraClient::initialize(camera_module_t *module) {
     snprintf(camera_device_name, sizeof(camera_device_name), "%d", mCameraId);
 
     mHardware = new CameraHardwareInterface(camera_device_name);
-    res = mHardware->initialize(&module->common);
+    res = mHardware->initialize(module);
     if (res != OK) {
         ALOGE("%s: Camera %d: unable to initialize device: %s (%d)",
                 __FUNCTION__, mCameraId, strerror(-res), res);
@@ -99,12 +100,7 @@ status_t CameraClient::initialize(camera_module_t *module) {
 
 // tear down the client
 CameraClient::~CameraClient() {
-    // this lock should never be NULL
-    Mutex* lock = mCameraService->getClientLockById(mCameraId);
-    lock->lock();
     mDestructionStarted = true;
-    // client will not be accessed from callback. should unlock to prevent dead-lock in disconnect
-    lock->unlock();
     int callingPid = getCallingPid();
     LOG1("CameraClient::~CameraClient E (pid %d, this %p)", callingPid, this);
 
@@ -113,13 +109,18 @@ CameraClient::~CameraClient() {
 }
 
 status_t CameraClient::dump(int fd, const Vector<String16>& args) {
+    return BasicClient::dump(fd, args);
+}
+
+status_t CameraClient::dumpClient(int fd, const Vector<String16>& args) {
     const size_t SIZE = 256;
     char buffer[SIZE];
 
-    size_t len = snprintf(buffer, SIZE, "Client[%d] (%p) PID: %d\n",
+    size_t len = snprintf(buffer, SIZE, "Client[%d] (%p) with UID %d\n",
             mCameraId,
-            getRemoteCallback()->asBinder().get(),
-            mClientPid);
+            (getRemoteCallback() != NULL ?
+                    IInterface::asBinder(getRemoteCallback()).get() : NULL),
+            mClientUid);
     len = (len > SIZE - 1) ? SIZE - 1 : len;
     write(fd, buffer, len);
 
@@ -147,12 +148,12 @@ status_t CameraClient::checkPid() const {
 }
 
 status_t CameraClient::checkPidAndHardware() const {
-    status_t result = checkPid();
-    if (result != NO_ERROR) return result;
     if (mHardware == 0) {
         ALOGE("attempt to use a camera after disconnect() (pid %d)", getCallingPid());
         return INVALID_OPERATION;
     }
+    status_t result = checkPid();
+    if (result != NO_ERROR) return result;
     return NO_ERROR;
 }
 
@@ -193,7 +194,7 @@ status_t CameraClient::unlock() {
 }
 
 // connect a new client to the camera
-status_t CameraClient::connect(const sp<ICameraClient>& client) {
+status_t CameraClient::connect(const sp<hardware::ICameraClient>& client) {
     int callingPid = getCallingPid();
     LOG1("connect E (pid %d)", callingPid);
     Mutex::Autolock lock(mLock);
@@ -205,7 +206,7 @@ status_t CameraClient::connect(const sp<ICameraClient>& client) {
     }
 
     if (mRemoteCallback != 0 &&
-        (client->asBinder() == mRemoteCallback->asBinder())) {
+        (IInterface::asBinder(client) == IInterface::asBinder(mRemoteCallback))) {
         LOG1("Connect to the same client");
         return NO_ERROR;
     }
@@ -229,25 +230,21 @@ static void disconnectWindow(const sp<ANativeWindow>& window) {
     }
 }
 
-void CameraClient::disconnect() {
+binder::Status CameraClient::disconnect() {
     int callingPid = getCallingPid();
     LOG1("disconnect E (pid %d)", callingPid);
     Mutex::Autolock lock(mLock);
 
-    // Allow both client and the media server to disconnect at all times
+    binder::Status res = binder::Status::ok();
+    // Allow both client and the cameraserver to disconnect at all times
     if (callingPid != mClientPid && callingPid != mServicePid) {
         ALOGW("different client - don't disconnect");
-        return;
-    }
-
-    if (mClientPid <= 0) {
-        LOG1("camera is unlocked (mClientPid = %d), don't tear down hardware", mClientPid);
-        return;
+        return res;
     }
 
     // Make sure disconnect() is done once and once only, whether it is called
     // from the user directly, or called by the destructor.
-    if (mHardware == 0) return;
+    if (mHardware == 0) return res;
 
     LOG1("hardware teardown");
     // Before destroying mHardware, we must make sure it's in the
@@ -255,6 +252,9 @@ void CameraClient::disconnect() {
     // Turn off all messages.
     disableMsgType(CAMERA_MSG_ALL_MSGS);
     mHardware->stopPreview();
+    mCameraService->updateProxyDeviceState(
+        ICameraServiceProxy::CAMERA_STATE_IDLE,
+        String8::format("%d", mCameraId));
     mHardware->cancelPicture();
     // Release the hardware resources.
     mHardware->release();
@@ -270,6 +270,8 @@ void CameraClient::disconnect() {
     CameraService::Client::disconnect();
 
     LOG1("disconnect X (pid %d)", callingPid);
+
+    return res;
 }
 
 // ----------------------------------------------------------------------------
@@ -297,9 +299,8 @@ status_t CameraClient::setPreviewWindow(const sp<IBinder>& binder,
     // If preview has been already started, register preview buffers now.
     if (mHardware->previewEnabled()) {
         if (window != 0) {
-            native_window_set_scaling_mode(window.get(),
-                    NATIVE_WINDOW_SCALING_MODE_SCALE_TO_WINDOW);
-            native_window_set_buffers_transform(window.get(), mOrientation);
+            mHardware->setPreviewScalingMode(NATIVE_WINDOW_SCALING_MODE_SCALE_TO_WINDOW);
+            mHardware->setPreviewTransform(mOrientation);
             result = mHardware->setPreviewWindow(window);
         }
     }
@@ -328,7 +329,7 @@ status_t CameraClient::setPreviewTarget(
     sp<IBinder> binder;
     sp<ANativeWindow> window;
     if (bufferProducer != 0) {
-        binder = bufferProducer->asBinder();
+        binder = IInterface::asBinder(bufferProducer);
         // Using controlledByApp flag to ensure that the buffer queue remains in
         // async mode for the old camera API, where many applications depend
         // on that behavior.
@@ -406,14 +407,17 @@ status_t CameraClient::startPreviewMode() {
     }
 
     if (mPreviewWindow != 0) {
-        native_window_set_scaling_mode(mPreviewWindow.get(),
-                NATIVE_WINDOW_SCALING_MODE_SCALE_TO_WINDOW);
-        native_window_set_buffers_transform(mPreviewWindow.get(),
-                mOrientation);
+        mHardware->setPreviewScalingMode(
+            NATIVE_WINDOW_SCALING_MODE_SCALE_TO_WINDOW);
+        mHardware->setPreviewTransform(mOrientation);
     }
     mHardware->setPreviewWindow(mPreviewWindow);
     result = mHardware->startPreview();
-
+    if (result == NO_ERROR) {
+        mCameraService->updateProxyDeviceState(
+            ICameraServiceProxy::CAMERA_STATE_ACTIVE,
+            String8::format("%d", mCameraId));
+    }
     return result;
 }
 
@@ -436,7 +440,7 @@ status_t CameraClient::startRecordingMode() {
 
     // start recording mode
     enableMsgType(CAMERA_MSG_VIDEO_FRAME);
-    mCameraService->playSound(CameraService::SOUND_RECORDING);
+    mCameraService->playSound(CameraService::SOUND_RECORDING_START);
     result = mHardware->startRecording();
     if (result != NO_ERROR) {
         ALOGE("mHardware->startRecording() failed with status %d", result);
@@ -453,7 +457,9 @@ void CameraClient::stopPreview() {
 
     disableMsgType(CAMERA_MSG_PREVIEW_FRAME);
     mHardware->stopPreview();
-
+    mCameraService->updateProxyDeviceState(
+        ICameraServiceProxy::CAMERA_STATE_IDLE,
+        String8::format("%d", mCameraId));
     mPreviewBuffer.clear();
 }
 
@@ -465,7 +471,7 @@ void CameraClient::stopRecording() {
 
     disableMsgType(CAMERA_MSG_VIDEO_FRAME);
     mHardware->stopRecording();
-    mCameraService->playSound(CameraService::SOUND_RECORDING);
+    mCameraService->playSound(CameraService::SOUND_RECORDING_STOP);
 
     mPreviewBuffer.clear();
 }
@@ -474,17 +480,66 @@ void CameraClient::stopRecording() {
 void CameraClient::releaseRecordingFrame(const sp<IMemory>& mem) {
     Mutex::Autolock lock(mLock);
     if (checkPidAndHardware() != NO_ERROR) return;
+    if (mem == nullptr) {
+        android_errorWriteWithInfoLog(CameraService::SN_EVENT_LOG_ID, "26164272",
+                IPCThreadState::self()->getCallingUid(), nullptr, 0);
+        return;
+    }
+
     mHardware->releaseRecordingFrame(mem);
 }
 
-status_t CameraClient::storeMetaDataInBuffers(bool enabled)
-{
-    LOG1("storeMetaDataInBuffers: %s", enabled? "true": "false");
+void CameraClient::releaseRecordingFrameHandle(native_handle_t *handle) {
+    if (handle == nullptr) return;
+
+    sp<IMemory> dataPtr;
+    {
+        Mutex::Autolock l(mAvailableCallbackBuffersLock);
+        if (!mAvailableCallbackBuffers.empty()) {
+            dataPtr = mAvailableCallbackBuffers.back();
+            mAvailableCallbackBuffers.pop_back();
+        }
+    }
+
+    if (dataPtr == nullptr) {
+        ALOGE("%s: %d: No callback buffer available. Dropping a native handle.", __FUNCTION__,
+                __LINE__);
+        native_handle_close(handle);
+        native_handle_delete(handle);
+        return;
+    } else if (dataPtr->size() != sizeof(VideoNativeHandleMetadata)) {
+        ALOGE("%s: %d: Callback buffer size doesn't match VideoNativeHandleMetadata", __FUNCTION__,
+                __LINE__);
+        native_handle_close(handle);
+        native_handle_delete(handle);
+        return;
+    }
+
+    VideoNativeHandleMetadata *metadata = (VideoNativeHandleMetadata*)(dataPtr->pointer());
+    metadata->eType = kMetadataBufferTypeNativeHandleSource;
+    metadata->pHandle = handle;
+
+    mHardware->releaseRecordingFrame(dataPtr);
+}
+
+status_t CameraClient::setVideoBufferMode(int32_t videoBufferMode) {
+    LOG1("setVideoBufferMode: %d", videoBufferMode);
+    bool enableMetadataInBuffers = false;
+
+    if (videoBufferMode == VIDEO_BUFFER_MODE_DATA_CALLBACK_METADATA) {
+        enableMetadataInBuffers = true;
+    } else if (videoBufferMode != VIDEO_BUFFER_MODE_DATA_CALLBACK_YUV) {
+        ALOGE("%s: %d: videoBufferMode %d is not supported.", __FUNCTION__, __LINE__,
+                videoBufferMode);
+        return BAD_VALUE;
+    }
+
     Mutex::Autolock lock(mLock);
     if (checkPidAndHardware() != NO_ERROR) {
         return UNKNOWN_ERROR;
     }
-    return mHardware->storeMetaDataInBuffers(enabled);
+
+    return mHardware->storeMetaDataInBuffers(enableMetadataInBuffers);
 }
 
 bool CameraClient::previewEnabled() {
@@ -627,8 +682,7 @@ status_t CameraClient::sendCommand(int32_t cmd, int32_t arg1, int32_t arg2) {
         if (mOrientation != orientation) {
             mOrientation = orientation;
             if (mPreviewWindow != 0) {
-                native_window_set_buffers_transform(mPreviewWindow.get(),
-                        mOrientation);
+                mHardware->setPreviewTransform(mOrientation);
             }
         }
         return OK;
@@ -643,7 +697,7 @@ status_t CameraClient::sendCommand(int32_t cmd, int32_t arg1, int32_t arg2) {
         }
         return OK;
     } else if (cmd == CAMERA_CMD_PLAY_RECORDING_SOUND) {
-        mCameraService->playSound(CameraService::SOUND_RECORDING);
+        mCameraService->playSound(CameraService::SOUND_RECORDING_START);
     } else if (cmd == CAMERA_CMD_SET_VIDEO_BUFFER_COUNT) {
         // Silently ignore this command
         return INVALID_OPERATION;
@@ -676,6 +730,13 @@ bool CameraClient::lockIfMessageWanted(int32_t msgType) {
                 LOG1("lockIfMessageWanted(%d): waited for %d ms",
                     msgType, sleepCount * CHECK_MESSAGE_INTERVAL);
             }
+
+            // If messages are no longer enabled after acquiring lock, release and drop message
+            if ((mMsgEnabled & msgType) == 0) {
+                mLock.unlock();
+                break;
+            }
+
             return true;
         }
         if (sleepCount++ == 0) {
@@ -701,26 +762,13 @@ bool CameraClient::lockIfMessageWanted(int32_t msgType) {
 //      (others)                        c->dataCallback
 // dataCallbackTimestamp
 //      (others)                        c->dataCallbackTimestamp
-//
-// NOTE: the *Callback functions grab mLock of the client before passing
-// control to handle* functions. So the handle* functions must release the
-// lock before calling the ICameraClient's callbacks, so those callbacks can
-// invoke methods in the Client class again (For example, the preview frame
-// callback may want to releaseRecordingFrame). The handle* functions must
-// release the lock after all accesses to member variables, so it must be
-// handled very carefully.
 
 void CameraClient::notifyCallback(int32_t msgType, int32_t ext1,
         int32_t ext2, void* user) {
     LOG2("notifyCallback(%d)", msgType);
 
-    Mutex* lock = getClientLockFromCookie(user);
-    if (lock == NULL) return;
-    Mutex::Autolock alock(*lock);
-
-    CameraClient* client =
-            static_cast<CameraClient*>(getClientFromCookie(user));
-    if (client == NULL) return;
+    sp<CameraClient> client = static_cast<CameraClient*>(getClientFromCookie(user).get());
+    if (client.get() == nullptr) return;
 
     if (!client->lockIfMessageWanted(msgType)) return;
 
@@ -739,13 +787,8 @@ void CameraClient::dataCallback(int32_t msgType,
         const sp<IMemory>& dataPtr, camera_frame_metadata_t *metadata, void* user) {
     LOG2("dataCallback(%d)", msgType);
 
-    Mutex* lock = getClientLockFromCookie(user);
-    if (lock == NULL) return;
-    Mutex::Autolock alock(*lock);
-
-    CameraClient* client =
-            static_cast<CameraClient*>(getClientFromCookie(user));
-    if (client == NULL) return;
+    sp<CameraClient> client = static_cast<CameraClient*>(getClientFromCookie(user).get());
+    if (client.get() == nullptr) return;
 
     if (!client->lockIfMessageWanted(msgType)) return;
     if (dataPtr == 0 && metadata == NULL) {
@@ -777,13 +820,8 @@ void CameraClient::dataCallbackTimestamp(nsecs_t timestamp,
         int32_t msgType, const sp<IMemory>& dataPtr, void* user) {
     LOG2("dataCallbackTimestamp(%d)", msgType);
 
-    Mutex* lock = getClientLockFromCookie(user);
-    if (lock == NULL) return;
-    Mutex::Autolock alock(*lock);
-
-    CameraClient* client =
-            static_cast<CameraClient*>(getClientFromCookie(user));
-    if (client == NULL) return;
+    sp<CameraClient> client = static_cast<CameraClient*>(getClientFromCookie(user).get());
+    if (client.get() == nullptr) return;
 
     if (!client->lockIfMessageWanted(msgType)) return;
 
@@ -802,13 +840,19 @@ void CameraClient::handleShutter(void) {
         mCameraService->playSound(CameraService::SOUND_SHUTTER);
     }
 
-    sp<ICameraClient> c = mRemoteCallback;
+    sp<hardware::ICameraClient> c = mRemoteCallback;
     if (c != 0) {
         mLock.unlock();
         c->notifyCallback(CAMERA_MSG_SHUTTER, 0, 0);
         if (!lockIfMessageWanted(CAMERA_MSG_SHUTTER)) return;
     }
     disableMsgType(CAMERA_MSG_SHUTTER);
+
+    // Shutters only happen in response to takePicture, so mark device as
+    // idle now, until preview is restarted
+    mCameraService->updateProxyDeviceState(
+        ICameraServiceProxy::CAMERA_STATE_IDLE,
+        String8::format("%d", mCameraId));
 
     mLock.unlock();
 }
@@ -833,7 +877,7 @@ void CameraClient::handlePreviewData(int32_t msgType,
     }
 
     // hold a strong pointer to the client
-    sp<ICameraClient> c = mRemoteCallback;
+    sp<hardware::ICameraClient> c = mRemoteCallback;
 
     // clear callback flags if no client or one-shot mode
     if (c == 0 || (mPreviewCallbackFlag & CAMERA_FRAME_CALLBACK_FLAG_ONE_SHOT_MASK)) {
@@ -863,7 +907,7 @@ void CameraClient::handlePreviewData(int32_t msgType,
 void CameraClient::handlePostview(const sp<IMemory>& mem) {
     disableMsgType(CAMERA_MSG_POSTVIEW_FRAME);
 
-    sp<ICameraClient> c = mRemoteCallback;
+    sp<hardware::ICameraClient> c = mRemoteCallback;
     mLock.unlock();
     if (c != 0) {
         c->dataCallback(CAMERA_MSG_POSTVIEW_FRAME, mem, NULL);
@@ -878,7 +922,7 @@ void CameraClient::handleRawPicture(const sp<IMemory>& mem) {
     size_t size;
     sp<IMemoryHeap> heap = mem->getMemory(&offset, &size);
 
-    sp<ICameraClient> c = mRemoteCallback;
+    sp<hardware::ICameraClient> c = mRemoteCallback;
     mLock.unlock();
     if (c != 0) {
         c->dataCallback(CAMERA_MSG_RAW_IMAGE, mem, NULL);
@@ -889,7 +933,7 @@ void CameraClient::handleRawPicture(const sp<IMemory>& mem) {
 void CameraClient::handleCompressedPicture(const sp<IMemory>& mem) {
     disableMsgType(CAMERA_MSG_COMPRESSED_IMAGE);
 
-    sp<ICameraClient> c = mRemoteCallback;
+    sp<hardware::ICameraClient> c = mRemoteCallback;
     mLock.unlock();
     if (c != 0) {
         c->dataCallback(CAMERA_MSG_COMPRESSED_IMAGE, mem, NULL);
@@ -899,7 +943,7 @@ void CameraClient::handleCompressedPicture(const sp<IMemory>& mem) {
 
 void CameraClient::handleGenericNotify(int32_t msgType,
     int32_t ext1, int32_t ext2) {
-    sp<ICameraClient> c = mRemoteCallback;
+    sp<hardware::ICameraClient> c = mRemoteCallback;
     mLock.unlock();
     if (c != 0) {
         c->notifyCallback(msgType, ext1, ext2);
@@ -908,7 +952,7 @@ void CameraClient::handleGenericNotify(int32_t msgType,
 
 void CameraClient::handleGenericData(int32_t msgType,
     const sp<IMemory>& dataPtr, camera_frame_metadata_t *metadata) {
-    sp<ICameraClient> c = mRemoteCallback;
+    sp<hardware::ICameraClient> c = mRemoteCallback;
     mLock.unlock();
     if (c != 0) {
         c->dataCallback(msgType, dataPtr, metadata);
@@ -917,15 +961,35 @@ void CameraClient::handleGenericData(int32_t msgType,
 
 void CameraClient::handleGenericDataTimestamp(nsecs_t timestamp,
     int32_t msgType, const sp<IMemory>& dataPtr) {
-    sp<ICameraClient> c = mRemoteCallback;
+    sp<hardware::ICameraClient> c = mRemoteCallback;
     mLock.unlock();
-    if (c != 0) {
-        c->dataCallbackTimestamp(timestamp, msgType, dataPtr);
+    if (c != 0 && dataPtr != nullptr) {
+        native_handle_t* handle = nullptr;
+
+        // Check if dataPtr contains a VideoNativeHandleMetadata.
+        if (dataPtr->size() == sizeof(VideoNativeHandleMetadata)) {
+            VideoNativeHandleMetadata *metadata =
+                (VideoNativeHandleMetadata*)(dataPtr->pointer());
+            if (metadata->eType == kMetadataBufferTypeNativeHandleSource) {
+                handle = metadata->pHandle;
+            }
+        }
+
+        // If dataPtr contains a native handle, send it via recordingFrameHandleCallbackTimestamp.
+        if (handle != nullptr) {
+            {
+                Mutex::Autolock l(mAvailableCallbackBuffersLock);
+                mAvailableCallbackBuffers.push_back(dataPtr);
+            }
+            c->recordingFrameHandleCallbackTimestamp(timestamp, handle);
+        } else {
+            c->dataCallbackTimestamp(timestamp, msgType, dataPtr);
+        }
     }
 }
 
 void CameraClient::copyFrameAndPostCopiedFrame(
-        int32_t msgType, const sp<ICameraClient>& client,
+        int32_t msgType, const sp<hardware::ICameraClient>& client,
         const sp<IMemoryHeap>& heap, size_t offset, size_t size,
         camera_frame_metadata_t *metadata) {
     LOG2("copyFrameAndPostCopiedFrame");
@@ -994,6 +1058,12 @@ int CameraClient::getOrientation(int degrees, bool mirror) {
     }
     ALOGE("Invalid setDisplayOrientation degrees=%d", degrees);
     return -1;
+}
+
+status_t CameraClient::setVideoTarget(const sp<IGraphicBufferProducer>& bufferProducer) {
+    (void)bufferProducer;
+    ALOGE("%s: %d: CameraClient doesn't support setting a video target.", __FUNCTION__, __LINE__);
+    return INVALID_OPERATION;
 }
 
 }; // namespace android

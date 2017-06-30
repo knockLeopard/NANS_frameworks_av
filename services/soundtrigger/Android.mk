@@ -38,6 +38,10 @@ LOCAL_SHARED_LIBRARIES:= \
 LOCAL_C_INCLUDES += \
     $(TOPDIR)frameworks/av/services/audioflinger
 
+LOCAL_MULTILIB := $(AUDIOSERVER_MULTILIB)
+
+LOCAL_CFLAGS := -Wall -Werror
+
 LOCAL_MODULE:= libsoundtriggerservice
 
 include $(BUILD_SHARED_LIBRARY)

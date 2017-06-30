@@ -33,7 +33,9 @@ class Camera3IOStreamBase :
         public Camera3Stream {
   protected:
     Camera3IOStreamBase(int id, camera3_stream_type_t type,
-            uint32_t width, uint32_t height, size_t maxSize, int format);
+            uint32_t width, uint32_t height, size_t maxSize, int format,
+            android_dataspace dataSpace, camera3_stream_rotation_t rotation,
+            int setId = CAMERA3_STREAM_SET_ID_INVALID);
 
   public:
 
@@ -83,7 +85,7 @@ class Camera3IOStreamBase :
 
     virtual size_t   getHandoutInputBufferCountLocked();
 
-    virtual status_t getEndpointUsage(uint32_t *usage) = 0;
+    virtual status_t getEndpointUsage(uint32_t *usage) const = 0;
 
     status_t getBufferPreconditionCheckLocked() const;
     status_t returnBufferPreconditionCheckLocked() const;

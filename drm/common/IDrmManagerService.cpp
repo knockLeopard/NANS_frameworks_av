@@ -34,6 +34,7 @@
 #include "IDrmManagerService.h"
 
 #define INVALID_BUFFER_LENGTH -1
+#define MAX_BINDER_TRANSACTION_SIZE ((1*1024*1024)-(4096*2))
 
 using namespace android;
 
@@ -148,7 +149,7 @@ status_t BpDrmManagerService::setDrmServiceListener(
 
     data.writeInterfaceToken(IDrmManagerService::getInterfaceDescriptor());
     data.writeInt32(uniqueId);
-    data.writeStrongBinder(drmServiceListener->asBinder());
+    data.writeStrongBinder(IInterface::asBinder(drmServiceListener));
     remote()->transact(SET_DRM_SERVICE_LISTENER, data, &reply);
     return reply.readInt32();
 }
@@ -302,7 +303,9 @@ DrmInfo* BpDrmManagerService::acquireDrmInfo(int uniqueId, const DrmInfoRequest*
         const String8 value = drmInforequest->get(key);
         if (key == String8("FileDescriptorKey")) {
             int fd = -1;
-            sscanf(value.string(), "FileDescriptor[%d]", &fd);
+            if (sscanf(value.string(), "FileDescriptor[%d]", &fd) != 1) {
+                sscanf(value.string(), "%d", &fd);
+            }
             data.writeFileDescriptor(fd);
         } else {
             data.writeString8((value == String8("")) ? String8("NULL") : value);
@@ -741,9 +744,11 @@ status_t BpDrmManagerService::decrypt(
     const status_t status = reply.readInt32();
     ALOGV("Return value of decrypt() is %d", status);
 
-    const int size = reply.readInt32();
-    (*decBuffer)->length = size;
-    reply.read((void *)(*decBuffer)->data, size);
+    if (status == NO_ERROR) {
+        const int size = reply.readInt32();
+        (*decBuffer)->length = size;
+        reply.read((void *)(*decBuffer)->data, size);
+    }
 
     return status;
 }
@@ -933,7 +938,12 @@ status_t BnDrmManagerService::onTransact(
 
         //Filling DRM info
         const int infoType = data.readInt32();
-        const int bufferSize = data.readInt32();
+        const uint32_t bufferSize = data.readInt32();
+
+        if (bufferSize > data.dataAvail()) {
+            return BAD_VALUE;
+        }
+
         char* buffer = NULL;
         if (0 < bufferSize) {
             buffer = (char *)data.readInplace(bufferSize);
@@ -986,6 +996,9 @@ status_t BnDrmManagerService::onTransact(
 
         const int size = data.readInt32();
         for (int index = 0; index < size; ++index) {
+            if (!data.dataAvail()) {
+                break;
+            }
             const String8 key(data.readString8());
             if (key == String8("FileDescriptorKey")) {
                 char buffer[16];
@@ -1035,7 +1048,12 @@ status_t BnDrmManagerService::onTransact(
         const int uniqueId = data.readInt32();
 
         //Filling DRM Rights
-        const int bufferSize = data.readInt32();
+        const uint32_t bufferSize = data.readInt32();
+        if (bufferSize > data.dataAvail()) {
+            reply->writeInt32(BAD_VALUE);
+            return DRM_NO_ERROR;
+        }
+
         const DrmBuffer drmBuffer((char *)data.readInplace(bufferSize), bufferSize);
 
         const String8 mimeType(data.readString8());
@@ -1206,10 +1224,13 @@ status_t BnDrmManagerService::onTransact(
         const int convertId = data.readInt32();
 
         //Filling input data
-        const int bufferSize = data.readInt32();
+        const uint32_t bufferSize = data.readInt32();
+        if (bufferSize > data.dataAvail()) {
+            return BAD_VALUE;
+        }
         DrmBuffer* inputData = new DrmBuffer((char *)data.readInplace(bufferSize), bufferSize);
 
-        DrmConvertedStatus*    drmConvertedStatus = convertData(uniqueId, convertId, inputData);
+        DrmConvertedStatus* drmConvertedStatus = convertData(uniqueId, convertId, inputData);
 
         if (NULL != drmConvertedStatus) {
             //Filling Drm Converted Ststus
@@ -1393,7 +1414,12 @@ status_t BnDrmManagerService::onTransact(
         const int decryptUnitId = data.readInt32();
 
         //Filling Header info
-        const int bufferSize = data.readInt32();
+        const uint32_t bufferSize = data.readInt32();
+        if (bufferSize > data.dataAvail()) {
+            reply->writeInt32(BAD_VALUE);
+            clearDecryptHandle(&handle);
+            return DRM_NO_ERROR;
+        }
         DrmBuffer* headerInfo = NULL;
         headerInfo = new DrmBuffer((char *)data.readInplace(bufferSize), bufferSize);
 
@@ -1417,9 +1443,17 @@ status_t BnDrmManagerService::onTransact(
         readDecryptHandleFromParcelData(&handle, data);
 
         const int decryptUnitId = data.readInt32();
-        const int decBufferSize = data.readInt32();
+        const uint32_t decBufferSize = data.readInt32();
+        const uint32_t encBufferSize = data.readInt32();
 
-        const int encBufferSize = data.readInt32();
+        if (encBufferSize > data.dataAvail() ||
+            decBufferSize > MAX_BINDER_TRANSACTION_SIZE) {
+            reply->writeInt32(BAD_VALUE);
+            reply->writeInt32(0);
+            clearDecryptHandle(&handle);
+            return DRM_NO_ERROR;
+        }
+
         DrmBuffer* encBuffer
             = new DrmBuffer((char *)data.readInplace(encBufferSize), encBufferSize);
 
@@ -1429,8 +1463,10 @@ status_t BnDrmManagerService::onTransact(
 
         DrmBuffer* IV = NULL;
         if (0 != data.dataAvail()) {
-            const int ivBufferlength = data.readInt32();
-            IV = new DrmBuffer((char *)data.readInplace(ivBufferlength), ivBufferlength);
+            const uint32_t ivBufferlength = data.readInt32();
+            if (ivBufferlength <= data.dataAvail()) {
+                IV = new DrmBuffer((char *)data.readInplace(ivBufferlength), ivBufferlength);
+            }
         }
 
         const status_t status
@@ -1438,9 +1474,11 @@ status_t BnDrmManagerService::onTransact(
 
         reply->writeInt32(status);
 
-        const int size = decBuffer->length;
-        reply->writeInt32(size);
-        reply->write(decBuffer->data, size);
+        if (status == NO_ERROR) {
+            const int size = decBuffer->length;
+            reply->writeInt32(size);
+            reply->write(decBuffer->data, size);
+        }
 
         clearDecryptHandle(&handle);
         delete encBuffer; encBuffer = NULL;
@@ -1477,7 +1515,11 @@ status_t BnDrmManagerService::onTransact(
         DecryptHandle handle;
         readDecryptHandleFromParcelData(&handle, data);
 
-        const int numBytes = data.readInt32();
+        const uint32_t numBytes = data.readInt32();
+        if (numBytes > MAX_BINDER_TRANSACTION_SIZE) {
+            reply->writeInt32(BAD_VALUE);
+            return DRM_NO_ERROR;
+        }
         char* buffer = new char[numBytes];
 
         const off64_t offset = data.readInt64();

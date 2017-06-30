@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <cutils/properties.h>
 #include "FastMixerState.h"
 
 namespace android {
@@ -33,10 +34,49 @@ FastMixerState::FastMixerState() : FastThreadState(),
     mFastTracksGen(0), mTrackMask(0), mOutputSink(NULL), mOutputSinkGen(0),
     mFrameCount(0), mTeeSink(NULL)
 {
+    int ok = pthread_once(&sMaxFastTracksOnce, sMaxFastTracksInit);
+    if (ok != 0) {
+        ALOGE("%s pthread_once failed: %d", __func__, ok);
+    }
 }
 
 FastMixerState::~FastMixerState()
 {
+}
+
+// static
+unsigned FastMixerState::sMaxFastTracks = kDefaultFastTracks;
+
+// static
+pthread_once_t FastMixerState::sMaxFastTracksOnce = PTHREAD_ONCE_INIT;
+
+// static
+const char *FastMixerState::commandToString(Command command)
+{
+    const char *str = FastThreadState::commandToString(command);
+    if (str != NULL) {
+        return str;
+    }
+    switch (command) {
+    case FastMixerState::MIX:       return "MIX";
+    case FastMixerState::WRITE:     return "WRITE";
+    case FastMixerState::MIX_WRITE: return "MIX_WRITE";
+    }
+    LOG_ALWAYS_FATAL("%s", __func__);
+}
+
+// static
+void FastMixerState::sMaxFastTracksInit()
+{
+    char value[PROPERTY_VALUE_MAX];
+    if (property_get("ro.audio.max_fast_tracks", value, NULL) > 0) {
+        char *endptr;
+        unsigned long ul = strtoul(value, &endptr, 0);
+        if (*endptr == '\0' && kMinFastTracks <= ul && ul <= kMaxFastTracks) {
+            sMaxFastTracks = (unsigned) ul;
+        }
+    }
+    ALOGI("sMaxFastTracks = %u", sMaxFastTracks);
 }
 
 }   // namespace android

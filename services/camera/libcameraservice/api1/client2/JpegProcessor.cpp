@@ -42,7 +42,8 @@ JpegProcessor::JpegProcessor(
         mDevice(client->getCameraDevice()),
         mSequencer(sequencer),
         mId(client->getCameraId()),
-        mCaptureAvailable(false),
+        mCaptureDone(false),
+        mCaptureSuccess(false),
         mCaptureStreamId(NO_STREAM) {
 }
 
@@ -53,9 +54,31 @@ JpegProcessor::~JpegProcessor() {
 
 void JpegProcessor::onFrameAvailable(const BufferItem& /*item*/) {
     Mutex::Autolock l(mInputMutex);
-    if (!mCaptureAvailable) {
-        mCaptureAvailable = true;
-        mCaptureAvailableSignal.signal();
+    ALOGV("%s", __FUNCTION__);
+    if (!mCaptureDone) {
+        mCaptureDone = true;
+        mCaptureSuccess = true;
+        mCaptureDoneSignal.signal();
+    }
+}
+
+void JpegProcessor::onBufferAcquired(const BufferInfo& /*bufferInfo*/) {
+    // Intentionally left empty
+}
+
+void JpegProcessor::onBufferReleased(const BufferInfo& bufferInfo) {
+    ALOGV("%s", __FUNCTION__);
+    if (bufferInfo.mError) {
+        // Only lock in case of error, since we get one of these for each
+        // onFrameAvailable as well, and scheduling may delay this call late
+        // enough to run into later preview restart operations, for non-error
+        // cases.
+        // b/29524651
+        ALOGV("%s: JPEG buffer lost", __FUNCTION__);
+        Mutex::Autolock l(mInputMutex);
+        mCaptureDone = true;
+        mCaptureSuccess = false;
+        mCaptureDoneSignal.signal();
     }
 }
 
@@ -87,7 +110,7 @@ status_t JpegProcessor::updateStream(const Parameters &params) {
         BufferQueue::createBufferQueue(&producer, &consumer);
         mCaptureConsumer = new CpuConsumer(consumer, 1);
         mCaptureConsumer->setFrameAvailableListener(this);
-        mCaptureConsumer->setName(String8("Camera2Client::CaptureConsumer"));
+        mCaptureConsumer->setName(String8("Camera2-JpegConsumer"));
         mCaptureWindow = new Surface(producer);
     }
 
@@ -108,14 +131,14 @@ status_t JpegProcessor::updateStream(const Parameters &params) {
             return NO_MEMORY;
         }
     }
-    ALOGV("%s: Camera %d: JPEG capture heap now %d bytes; requested %d bytes",
+    ALOGV("%s: Camera %d: JPEG capture heap now %zu bytes; requested %zd bytes",
             __FUNCTION__, mId, mCaptureHeap->getSize(), maxJpegSize);
 
     if (mCaptureStreamId != NO_STREAM) {
         // Check if stream parameters have to change
         uint32_t currentWidth, currentHeight;
         res = device->getStreamInfo(mCaptureStreamId,
-                &currentWidth, &currentHeight, 0);
+                &currentWidth, &currentHeight, 0, 0);
         if (res != OK) {
             ALOGE("%s: Camera %d: Error querying capture output stream info: "
                     "%s (%d)", __FUNCTION__,
@@ -145,7 +168,8 @@ status_t JpegProcessor::updateStream(const Parameters &params) {
         // Create stream for HAL production
         res = device->createStream(mCaptureWindow,
                 params.pictureWidth, params.pictureHeight,
-                HAL_PIXEL_FORMAT_BLOB, &mCaptureStreamId);
+                HAL_PIXEL_FORMAT_BLOB, HAL_DATASPACE_V0_JFIF,
+                CAMERA3_STREAM_ROTATION_0, &mCaptureStreamId);
         if (res != OK) {
             ALOGE("%s: Camera %d: Can't create output stream for capture: "
                     "%s (%d)", __FUNCTION__, mId,
@@ -153,6 +177,12 @@ status_t JpegProcessor::updateStream(const Parameters &params) {
             return res;
         }
 
+        res = device->addBufferListenerForStream(mCaptureStreamId, this);
+        if (res != OK) {
+              ALOGE("%s: Camera %d: Can't add buffer listeneri: %s (%d)",
+                    __FUNCTION__, mId, strerror(-res), res);
+              return res;
+        }
     }
     return OK;
 }
@@ -191,24 +221,26 @@ void JpegProcessor::dump(int /*fd*/, const Vector<String16>& /*args*/) const {
 bool JpegProcessor::threadLoop() {
     status_t res;
 
+    bool captureSuccess = false;
     {
         Mutex::Autolock l(mInputMutex);
-        while (!mCaptureAvailable) {
-            res = mCaptureAvailableSignal.waitRelative(mInputMutex,
+
+        while (!mCaptureDone) {
+            res = mCaptureDoneSignal.waitRelative(mInputMutex,
                     kWaitDuration);
             if (res == TIMED_OUT) return true;
         }
-        mCaptureAvailable = false;
+
+        captureSuccess = mCaptureSuccess;
+        mCaptureDone = false;
     }
 
-    do {
-        res = processNewCapture();
-    } while (res == OK);
+    res = processNewCapture(captureSuccess);
 
     return true;
 }
 
-status_t JpegProcessor::processNewCapture() {
+status_t JpegProcessor::processNewCapture(bool captureSuccess) {
     ATRACE_CALL();
     status_t res;
     sp<Camera2Heap> captureHeap;
@@ -216,7 +248,7 @@ status_t JpegProcessor::processNewCapture() {
 
     CpuConsumer::LockedBuffer imgBuffer;
 
-    {
+    if (captureSuccess) {
         Mutex::Autolock l(mInputMutex);
         if (mCaptureStreamId == NO_STREAM) {
             ALOGW("%s: Camera %d: No stream is available", __FUNCTION__, mId);
@@ -268,7 +300,7 @@ status_t JpegProcessor::processNewCapture() {
 
     sp<CaptureSequencer> sequencer = mSequencer.promote();
     if (sequencer != 0) {
-        sequencer->onCaptureAvailable(imgBuffer.timestamp, captureBuffer);
+        sequencer->onCaptureAvailable(imgBuffer.timestamp, captureBuffer, !captureSuccess);
     }
 
     return OK;

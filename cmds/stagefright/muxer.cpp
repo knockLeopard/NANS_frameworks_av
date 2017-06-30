@@ -17,6 +17,9 @@
 //#define LOG_NDEBUG 0
 #define LOG_TAG "muxer"
 #include <inttypes.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <utils/Log.h>
 
 #include <binder/ProcessState.h>
@@ -40,6 +43,7 @@ static void usage(const char *me) {
     fprintf(stderr, "       -h help\n");
     fprintf(stderr, "       -a use audio\n");
     fprintf(stderr, "       -v use video\n");
+    fprintf(stderr, "       -w mux into WebM container (default is MP4)\n");
     fprintf(stderr, "       -s Time in milli-seconds when the trim should start\n");
     fprintf(stderr, "       -e Time in milli-seconds when the trim should end\n");
     fprintf(stderr, "       -o output file name. Default is /sdcard/muxeroutput.mp4\n");
@@ -50,7 +54,6 @@ static void usage(const char *me) {
 using namespace android;
 
 static int muxing(
-        const android::sp<android::ALooper> &looper,
         const char *path,
         bool useAudio,
         bool useVideo,
@@ -58,7 +61,8 @@ static int muxing(
         bool enableTrim,
         int trimStartTimeMs,
         int trimEndTimeMs,
-        int rotationDegrees) {
+        int rotationDegrees,
+        MediaMuxer::OutputFormat container = MediaMuxer::OUTPUT_FORMAT_MPEG_4) {
     sp<NuMediaExtractor> extractor = new NuMediaExtractor;
     if (extractor->setDataSource(NULL /* httpService */, path) != OK) {
         fprintf(stderr, "unable to instantiate extractor. %s\n", path);
@@ -72,8 +76,14 @@ static int muxing(
     ALOGV("input file %s, output file %s", path, outputFileName);
     ALOGV("useAudio %d, useVideo %d", useAudio, useVideo);
 
-    sp<MediaMuxer> muxer = new MediaMuxer(outputFileName,
-                                          MediaMuxer::OUTPUT_FORMAT_MPEG_4);
+    int fd = open(outputFileName, O_CREAT | O_LARGEFILE | O_TRUNC | O_RDWR, S_IRUSR | S_IWUSR);
+
+    if (fd < 0) {
+        ALOGE("couldn't open file");
+        return fd;
+    }
+    sp<MediaMuxer> muxer = new MediaMuxer(fd, container);
+    close(fd);
 
     size_t trackCount = extractor->countTracks();
     // Map the extractor's track index to the muxer's track index.
@@ -127,14 +137,19 @@ static int muxing(
             }
         }
 
-        ALOGV("selecting track %d", i);
+        ALOGV("selecting track %zu", i);
 
         err = extractor->selectTrack(i);
         CHECK_EQ(err, (status_t)OK);
 
         ssize_t newTrackIndex = muxer->addTrack(format);
-        CHECK_GE(newTrackIndex, 0);
-        trackIndexMap.add(i, newTrackIndex);
+        if (newTrackIndex < 0) {
+            fprintf(stderr, "%s track (%zu) unsupported by muxer\n",
+                    isAudio ? "audio" : "video",
+                    i);
+        } else {
+            trackIndexMap.add(i, newTrackIndex);
+        }
     }
 
     int64_t muxerStartTimeUs = ALooper::GetNowUs();
@@ -153,7 +168,12 @@ static int muxing(
             ALOGV("saw input eos, err %d", err);
             sawInputEOS = true;
             break;
+        } else if (trackIndexMap.indexOfKey(trackIndex) < 0) {
+            // ALOGV("skipping input from unsupported track %zu", trackIndex);
+            extractor->advance();
+            continue;
         } else {
+            // ALOGV("reading sample from track index %zu\n", trackIndex);
             err = extractor->readSampleData(newBuffer);
             CHECK_EQ(err, (status_t)OK);
 
@@ -218,9 +238,10 @@ int main(int argc, char **argv) {
     // When trimStartTimeMs and trimEndTimeMs seems valid, we turn this switch
     // to true.
     bool enableTrim = false;
+    MediaMuxer::OutputFormat container = MediaMuxer::OUTPUT_FORMAT_MPEG_4;
 
     int res;
-    while ((res = getopt(argc, argv, "h?avo:s:e:r:")) >= 0) {
+    while ((res = getopt(argc, argv, "h?avo:s:e:r:w")) >= 0) {
         switch (res) {
             case 'a':
             {
@@ -231,6 +252,12 @@ int main(int argc, char **argv) {
             case 'v':
             {
                 useVideo = true;
+                break;
+            }
+
+            case 'w':
+            {
+                container = MediaMuxer::OUTPUT_FORMAT_WEBM;
                 break;
             }
 
@@ -298,8 +325,8 @@ int main(int argc, char **argv) {
     sp<ALooper> looper = new ALooper;
     looper->start();
 
-    int result = muxing(looper, argv[0], useAudio, useVideo, outputFileName,
-                        enableTrim, trimStartTimeMs, trimEndTimeMs, rotationDegrees);
+    int result = muxing(argv[0], useAudio, useVideo, outputFileName,
+                        enableTrim, trimStartTimeMs, trimEndTimeMs, rotationDegrees, container);
 
     looper->stop();
 

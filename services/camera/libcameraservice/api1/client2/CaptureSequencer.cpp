@@ -26,9 +26,8 @@
 
 #include "api1/Camera2Client.h"
 #include "api1/client2/CaptureSequencer.h"
-#include "api1/client2/BurstCapture.h"
 #include "api1/client2/Parameters.h"
-#include "api1/client2/ZslProcessorInterface.h"
+#include "api1/client2/ZslProcessor.h"
 
 namespace android {
 namespace camera2 {
@@ -42,7 +41,10 @@ CaptureSequencer::CaptureSequencer(wp<Camera2Client> client):
         mNewAEState(false),
         mNewFrameReceived(false),
         mNewCaptureReceived(false),
+        mNewCaptureErrorCnt(0),
         mShutterNotified(false),
+        mHalNotifiedShutter(false),
+        mShutterCaptureId(-1),
         mClient(client),
         mCaptureState(IDLE),
         mStateTransitionCount(0),
@@ -57,7 +59,7 @@ CaptureSequencer::~CaptureSequencer() {
     ALOGV("%s: Exit", __FUNCTION__);
 }
 
-void CaptureSequencer::setZslProcessor(wp<ZslProcessorInterface> processor) {
+void CaptureSequencer::setZslProcessor(wp<ZslProcessor> processor) {
     Mutex::Autolock l(mInputMutex);
     mZslProcessor = processor;
 }
@@ -106,6 +108,17 @@ void CaptureSequencer::notifyAutoExposure(uint8_t newState, int triggerId) {
     }
 }
 
+void CaptureSequencer::notifyShutter(const CaptureResultExtras& resultExtras,
+                                     nsecs_t timestamp) {
+    ATRACE_CALL();
+    (void) timestamp;
+    Mutex::Autolock l(mInputMutex);
+    if (!mHalNotifiedShutter && resultExtras.requestId == mShutterCaptureId) {
+        mHalNotifiedShutter = true;
+        mShutterNotifySignal.signal();
+    }
+}
+
 void CaptureSequencer::onResultAvailable(const CaptureResult &result) {
     ATRACE_CALL();
     ALOGV("%s: New result available.", __FUNCTION__);
@@ -119,7 +132,7 @@ void CaptureSequencer::onResultAvailable(const CaptureResult &result) {
 }
 
 void CaptureSequencer::onCaptureAvailable(nsecs_t timestamp,
-        sp<MemoryBase> captureBuffer) {
+        sp<MemoryBase> captureBuffer, bool captureError) {
     ATRACE_CALL();
     ALOGV("%s", __FUNCTION__);
     Mutex::Autolock l(mInputMutex);
@@ -127,6 +140,11 @@ void CaptureSequencer::onCaptureAvailable(nsecs_t timestamp,
     mCaptureBuffer = captureBuffer;
     if (!mNewCaptureReceived) {
         mNewCaptureReceived = true;
+        if (captureError) {
+            mNewCaptureErrorCnt++;
+        } else {
+            mNewCaptureErrorCnt = 0;
+        }
         mNewCaptureSignal.signal();
     }
 }
@@ -162,8 +180,6 @@ const char* CaptureSequencer::kStateNames[CaptureSequencer::NUM_CAPTURE_STATES+1
     "STANDARD_PRECAPTURE_WAIT",
     "STANDARD_CAPTURE",
     "STANDARD_CAPTURE_WAIT",
-    "BURST_CAPTURE_START",
-    "BURST_CAPTURE_WAIT",
     "DONE",
     "ERROR",
     "UNKNOWN"
@@ -180,8 +196,6 @@ const CaptureSequencer::StateManager
     &CaptureSequencer::manageStandardPrecaptureWait,
     &CaptureSequencer::manageStandardCapture,
     &CaptureSequencer::manageStandardCaptureWait,
-    &CaptureSequencer::manageBurstCaptureStart,
-    &CaptureSequencer::manageBurstCaptureWait,
     &CaptureSequencer::manageDone,
 };
 
@@ -281,7 +295,7 @@ CaptureSequencer::CaptureState CaptureSequencer::manageDone(sp<Camera2Client> &c
         }
         takePictureCounter = l.mParameters.takePictureCounter;
     }
-    sp<ZslProcessorInterface> processor = mZslProcessor.promote();
+    sp<ZslProcessor> processor = mZslProcessor.promote();
     if (processor != 0) {
         ALOGV("%s: Memory optimization, clearing ZSL queue",
               __FUNCTION__);
@@ -324,16 +338,17 @@ CaptureSequencer::CaptureState CaptureSequencer::manageStart(
         return DONE;
     }
 
-    if(l.mParameters.lightFx != Parameters::LIGHTFX_NONE &&
-            l.mParameters.state == Parameters::STILL_CAPTURE) {
-        nextState = BURST_CAPTURE_START;
-    }
-    else if (l.mParameters.zslMode &&
+    else if (l.mParameters.useZeroShutterLag() &&
             l.mParameters.state == Parameters::STILL_CAPTURE &&
             l.mParameters.flashMode != Parameters::FLASH_MODE_ON) {
         nextState = ZSL_START;
     } else {
         nextState = STANDARD_START;
+    }
+    {
+        Mutex::Autolock l(mInputMutex);
+        mShutterCaptureId = mCaptureId;
+        mHalNotifiedShutter = false;
     }
     mShutterNotified = false;
 
@@ -344,7 +359,7 @@ CaptureSequencer::CaptureState CaptureSequencer::manageZslStart(
         sp<Camera2Client> &client) {
     ALOGV("%s", __FUNCTION__);
     status_t res;
-    sp<ZslProcessorInterface> processor = mZslProcessor.promote();
+    sp<ZslProcessor> processor = mZslProcessor.promote();
     if (processor == 0) {
         ALOGE("%s: No ZSL queue to use!", __FUNCTION__);
         return DONE;
@@ -487,6 +502,17 @@ CaptureSequencer::CaptureState CaptureSequencer::manageStandardCapture(
      *  - recording (if recording enabled)
      */
     outputStreams.push(client->getPreviewStreamId());
+
+    int captureStreamId = client->getCaptureStreamId();
+    if (captureStreamId == Camera2Client::NO_STREAM) {
+        res = client->createJpegStreamL(l.mParameters);
+        if (res != OK || client->getCaptureStreamId() == Camera2Client::NO_STREAM) {
+            ALOGE("%s: Camera %d: cannot create jpeg stream for slowJpeg mode: %s (%d)",
+                  __FUNCTION__, client->getCameraId(), strerror(-res), res);
+            return DONE;
+        }
+    }
+
     outputStreams.push(client->getCaptureStreamId());
 
     if (l.mParameters.previewCallbackFlags &
@@ -541,6 +567,7 @@ CaptureSequencer::CaptureState CaptureSequencer::manageStandardCapture(
             return DONE;
         }
     }
+
     // TODO: Capture should be atomic with setStreamingRequest here
     res = client->getCameraDevice()->capture(captureCopy);
     if (res != OK) {
@@ -560,6 +587,31 @@ CaptureSequencer::CaptureState CaptureSequencer::manageStandardCaptureWait(
     ATRACE_CALL();
     Mutex::Autolock l(mInputMutex);
 
+
+    // Wait for shutter callback
+    while (!mHalNotifiedShutter) {
+        if (mTimeoutCount <= 0) {
+            break;
+        }
+        res = mShutterNotifySignal.waitRelative(mInputMutex, kWaitDuration);
+        if (res == TIMED_OUT) {
+            mTimeoutCount--;
+            return STANDARD_CAPTURE_WAIT;
+        }
+    }
+
+    if (mHalNotifiedShutter) {
+        if (!mShutterNotified) {
+            SharedParameters::Lock l(client->getParameters());
+            /* warning: this also locks a SharedCameraCallbacks */
+            shutterNotifyLocked(l.mParameters, client, mMsgType);
+            mShutterNotified = true;
+        }
+    } else if (mTimeoutCount <= 0) {
+        ALOGW("Timed out waiting for shutter notification");
+        return DONE;
+    }
+
     // Wait for new metadata result (mNewFrame)
     while (!mNewFrameReceived) {
         res = mNewFrameSignal.waitRelative(mInputMutex, kWaitDuration);
@@ -567,15 +619,6 @@ CaptureSequencer::CaptureState CaptureSequencer::manageStandardCaptureWait(
             mTimeoutCount--;
             break;
         }
-    }
-
-    // Approximation of the shutter being closed
-    // - TODO: use the hal3 exposure callback in Camera3Device instead
-    if (mNewFrameReceived && !mShutterNotified) {
-        SharedParameters::Lock l(client->getParameters());
-        /* warning: this also locks a SharedCameraCallbacks */
-        shutterNotifyLocked(l.mParameters, client, mMsgType);
-        mShutterNotified = true;
     }
 
     // Wait until jpeg was captured by JpegProcessor
@@ -586,11 +629,23 @@ CaptureSequencer::CaptureState CaptureSequencer::manageStandardCaptureWait(
             break;
         }
     }
+    if (mNewCaptureReceived) {
+        if (mNewCaptureErrorCnt > kMaxRetryCount) {
+            ALOGW("Exceeding multiple retry limit of %d due to buffer drop", kMaxRetryCount);
+            return DONE;
+        } else if (mNewCaptureErrorCnt > 0) {
+            ALOGW("Capture error happened, retry %d...", mNewCaptureErrorCnt);
+            mNewCaptureReceived = false;
+            return STANDARD_CAPTURE;
+        }
+    }
+
     if (mTimeoutCount <= 0) {
         ALOGW("Timed out waiting for capture to complete");
         return DONE;
     }
     if (mNewFrameReceived && mNewCaptureReceived) {
+
         if (mNewFrameId != mCaptureId) {
             ALOGW("Mismatched capture frame IDs: Expected %d, got %d",
                     mCaptureId, mNewFrameId);
@@ -616,77 +671,6 @@ CaptureSequencer::CaptureState CaptureSequencer::manageStandardCaptureWait(
         return DONE;
     }
     return STANDARD_CAPTURE_WAIT;
-}
-
-CaptureSequencer::CaptureState CaptureSequencer::manageBurstCaptureStart(
-        sp<Camera2Client> &client) {
-    ALOGV("%s", __FUNCTION__);
-    status_t res;
-    ATRACE_CALL();
-
-    // check which burst mode is set, create respective burst object
-    {
-        SharedParameters::Lock l(client->getParameters());
-
-        res = updateCaptureRequest(l.mParameters, client);
-        if(res != OK) {
-            return DONE;
-        }
-
-        //
-        // check for burst mode type in mParameters here
-        //
-        mBurstCapture = new BurstCapture(client, this);
-    }
-
-    res = mCaptureRequest.update(ANDROID_REQUEST_ID, &mCaptureId, 1);
-    if (res == OK) {
-        res = mCaptureRequest.sort();
-    }
-    if (res != OK) {
-        ALOGE("%s: Camera %d: Unable to set up still capture request: %s (%d)",
-                __FUNCTION__, client->getCameraId(), strerror(-res), res);
-        return DONE;
-    }
-
-    CameraMetadata captureCopy = mCaptureRequest;
-    if (captureCopy.entryCount() == 0) {
-        ALOGE("%s: Camera %d: Unable to copy capture request for HAL device",
-                __FUNCTION__, client->getCameraId());
-        return DONE;
-    }
-
-    Vector<CameraMetadata> requests;
-    requests.push(mCaptureRequest);
-    res = mBurstCapture->start(requests, mCaptureId);
-    mTimeoutCount = kMaxTimeoutsForCaptureEnd * 10;
-    return BURST_CAPTURE_WAIT;
-}
-
-CaptureSequencer::CaptureState CaptureSequencer::manageBurstCaptureWait(
-        sp<Camera2Client> &/*client*/) {
-    status_t res;
-    ATRACE_CALL();
-
-    while (!mNewCaptureReceived) {
-        res = mNewCaptureSignal.waitRelative(mInputMutex, kWaitDuration);
-        if (res == TIMED_OUT) {
-            mTimeoutCount--;
-            break;
-        }
-    }
-
-    if (mTimeoutCount <= 0) {
-        ALOGW("Timed out waiting for burst capture to complete");
-        return DONE;
-    }
-    if (mNewCaptureReceived) {
-        mNewCaptureReceived = false;
-        // TODO: update mCaptureId to last burst's capture ID + 1?
-        return DONE;
-    }
-
-    return BURST_CAPTURE_WAIT;
 }
 
 status_t CaptureSequencer::updateCaptureRequest(const Parameters &params,

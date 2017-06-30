@@ -31,19 +31,6 @@
 
 namespace android {
 
-AMRWriter::AMRWriter(const char *filename)
-    : mFd(-1),
-      mInitCheck(NO_INIT),
-      mStarted(false),
-      mPaused(false),
-      mResumed(false) {
-
-    mFd = open(filename, O_CREAT | O_LARGEFILE | O_TRUNC | O_RDWR, S_IRUSR | S_IWUSR);
-    if (mFd >= 0) {
-        mInitCheck = OK;
-    }
-}
-
 AMRWriter::AMRWriter(int fd)
     : mFd(dup(fd)),
       mInitCheck(mFd < 0? NO_INIT: OK),
@@ -67,7 +54,7 @@ status_t AMRWriter::initCheck() const {
     return mInitCheck;
 }
 
-status_t AMRWriter::addSource(const sp<MediaSource> &source) {
+status_t AMRWriter::addSource(const sp<IMediaSource> &source) {
     if (mInitCheck != OK) {
         return mInitCheck;
     }

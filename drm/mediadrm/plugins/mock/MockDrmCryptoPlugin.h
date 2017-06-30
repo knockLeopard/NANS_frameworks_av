@@ -62,7 +62,8 @@ namespace android {
                                Vector<uint8_t> const &initData,
                                String8 const &mimeType, KeyType keyType,
                                KeyedVector<String8, String8> const &optionalParameters,
-                               Vector<uint8_t> &request, String8 &defaultUrl);
+                               Vector<uint8_t> &request, String8 &defaultUrl,
+                               KeyRequestType *keyRequestType);
 
         status_t provideKeyResponse(Vector<uint8_t> const &sessionId,
                                     Vector<uint8_t> const &response,
@@ -84,8 +85,6 @@ namespace android {
         status_t provideProvisionResponse(Vector<uint8_t> const &response,
                                           Vector<uint8_t> &certificate,
                                           Vector<uint8_t> &wrappedKey);
-
-        status_t unprovisionDevice();
 
         status_t getSecureStops(List<Vector<uint8_t> > &secureStops);
         status_t getSecureStop(Vector<uint8_t> const &ssid, Vector<uint8_t> &secureStop);
@@ -160,7 +159,7 @@ namespace android {
 
         ssize_t decrypt(bool secure,
             const uint8_t key[16], const uint8_t iv[16],
-            Mode mode, const void *srcPtr,
+            Mode mode, const Pattern &pattern, const void *srcPtr,
             const SubSample *subSamples, size_t numSubSamples,
             void *dstPtr, AString *errorDetailMsg);
     private:

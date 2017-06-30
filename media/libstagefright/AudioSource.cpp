@@ -50,14 +50,23 @@ static void AudioRecordCallbackFunction(int event, void *user, void *info) {
 }
 
 AudioSource::AudioSource(
-        audio_source_t inputSource, uint32_t sampleRate, uint32_t channelCount)
+        audio_source_t inputSource, const String16 &opPackageName,
+        uint32_t sampleRate, uint32_t channelCount, uint32_t outSampleRate,
+        uid_t uid, pid_t pid)
     : mStarted(false),
       mSampleRate(sampleRate),
+      mOutSampleRate(outSampleRate > 0 ? outSampleRate : sampleRate),
+      mTrackMaxAmplitude(false),
+      mStartTimeUs(0),
+      mMaxAmplitude(0),
       mPrevSampleTimeUs(0),
+      mInitialReadTimeUs(0),
       mNumFramesReceived(0),
       mNumClientOwnedBuffers(0) {
-    ALOGV("sampleRate: %d, channelCount: %d", sampleRate, channelCount);
+    ALOGV("sampleRate: %u, outSampleRate: %u, channelCount: %u",
+            sampleRate, outSampleRate, channelCount);
     CHECK(channelCount == 1 || channelCount == 2);
+    CHECK(sampleRate > 0);
 
     size_t minFrameCount;
     status_t status = AudioRecord::getMinFrameCount(&minFrameCount,
@@ -78,11 +87,20 @@ AudioSource::AudioSource(
         mRecord = new AudioRecord(
                     inputSource, sampleRate, AUDIO_FORMAT_PCM_16_BIT,
                     audio_channel_in_mask_from_count(channelCount),
+                    opPackageName,
                     (size_t) (bufCount * frameCount),
                     AudioRecordCallbackFunction,
                     this,
-                    frameCount /*notificationFrames*/);
+                    frameCount /*notificationFrames*/,
+                    AUDIO_SESSION_ALLOCATE,
+                    AudioRecord::TRANSFER_DEFAULT,
+                    AUDIO_INPUT_FLAG_NONE,
+                    uid,
+                    pid);
         mInitCheck = mRecord->initCheck();
+        if (mInitCheck != OK) {
+            mRecord.clear();
+        }
     } else {
         mInitCheck = status;
     }
@@ -175,6 +193,7 @@ sp<MetaData> AudioSource::getFormat() {
     meta->setInt32(kKeySampleRate, mSampleRate);
     meta->setInt32(kKeyChannelCount, mRecord->channelCount());
     meta->setInt32(kKeyMaxInputSize, kMaxBufferSize);
+    meta->setInt32(kKeyPcmEncoding, kAudioEncodingPcm16bit);
 
     return meta;
 }
@@ -256,6 +275,11 @@ status_t AudioSource::read(
             (int16_t *) buffer->data(), buffer->range_length() >> 1);
     }
 
+    if (mSampleRate != mOutSampleRate) {
+            timeUs *= (int64_t)mSampleRate / (int64_t)mOutSampleRate;
+            buffer->meta_data()->setInt64(kKeyTime, timeUs);
+    }
+
     *out = buffer;
     return OK;
 }
@@ -272,6 +296,10 @@ void AudioSource::signalBufferReturned(MediaBuffer *buffer) {
 
 status_t AudioSource::dataCallback(const AudioRecord::Buffer& audioBuffer) {
     int64_t timeUs = systemTime() / 1000ll;
+    // Estimate the real sampling time of the 1st sample in this buffer
+    // from AudioRecord's latency. (Apply this adjustment first so that
+    // the start time logic is not affected.)
+    timeUs -= mRecord->latency() * 1000LL;
 
     ALOGV("dataCallbackTimestamp: %" PRId64 " us", timeUs);
     Mutex::Autolock autoLock(mLock);

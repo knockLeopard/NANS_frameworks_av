@@ -17,11 +17,12 @@
 #ifndef ANDROID_TONEGENERATOR_H_
 #define ANDROID_TONEGENERATOR_H_
 
-#include <utils/RefBase.h>
-#include <utils/KeyedVector.h>
-#include <utils/threads.h>
 #include <media/AudioSystem.h>
 #include <media/AudioTrack.h>
+#include <utils/Compat.h>
+#include <utils/KeyedVector.h>
+#include <utils/RefBase.h>
+#include <utils/threads.h>
 
 namespace android {
 
@@ -192,12 +193,21 @@ private:
         TONE_JAPAN_DIAL,            // Dial tone: 400Hz, continuous
         TONE_JAPAN_BUSY,            // Busy tone: 400Hz, 500ms ON, 500ms OFF...
         TONE_JAPAN_RADIO_ACK,       // Radio path acknowlegment: 400Hz, 1s ON, 2s OFF...
+        // GB Supervisory tones
+        TONE_GB_RINGTONE,           // Ring Tone: A 400Hz + 450Hz tone repeated in a 0.4s on, 0.2s off, 0.4s on, 2.0s off pattern.
+        // AUSTRALIA Supervisory tones
+        TONE_AUSTRALIA_RINGTONE,    // Ring tone: A 400Hz + 450Hz tone repeated in a 0.4s on, 0.2s off, 0.4s on, 2.0s off pattern.
+        TONE_AUSTRALIA_BUSY,        // Busy tone: 425 Hz repeated in a 0.375s on, 0.375s off pattern.
+        TONE_AUSTRALIA_CALL_WAITING,// Call waiting tone: 425Hz tone repeated in a 0.2s on, 0.2s off, 0.2s on, 4.4s off pattern.
+        TONE_AUSTRALIA_CONGESTION,  // Congestion tone: 425Hz tone repeated in a 0.375s on, 0.375s off pattern
         NUM_ALTERNATE_TONES
     };
 
     enum region {
         ANSI,
         JAPAN,
+        GB,
+        AUSTRALIA,
         CEPT,
         NUM_REGIONS
     };
@@ -207,7 +217,7 @@ private:
     static const unsigned int TONEGEN_MAX_WAVES = 3;     // Maximun number of sine waves in a tone segment
     static const unsigned int TONEGEN_MAX_SEGMENTS = 12;  // Maximun number of segments in a tone descriptor
     static const unsigned int TONEGEN_INF = 0xFFFFFFFF;  // Represents infinite time duration
-    static const float TONEGEN_GAIN = 0.9;  // Default gain passed to  WaveGenerator().
+    static const CONSTEXPR float TONEGEN_GAIN = 0.9;  // Default gain passed to  WaveGenerator().
 
     // ToneDescriptor class contains all parameters needed to generate a tone:
     //    - The array waveFreq[]:
@@ -303,7 +313,7 @@ private:
 
         short mA1_Q14;  // Q14 coefficient
         // delay line of full amplitude generator
-        short mS1, mS2;  // delay line S2 oldest
+        long mS1, mS2;  // delay line S2 oldest
         short mS2_0;  // saved value for reinitialisation
         short mAmplitude_Q15;  // Q15 amplitude
     };

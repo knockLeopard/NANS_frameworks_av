@@ -19,37 +19,44 @@
 
 #include <media/stagefright/foundation/ABase.h>
 #include <media/stagefright/foundation/AHandlerReflector.h>
+#include <media/stagefright/foundation/Mutexed.h>
 #include <media/stagefright/MediaSource.h>
+
+#include <gui/IGraphicBufferConsumer.h>
 
 namespace android {
 
-class ALooper;
-class AMessage;
+struct ALooper;
+struct AMessage;
+struct AReplyToken;
 class IGraphicBufferProducer;
-class MediaCodec;
+struct MediaCodec;
 class MetaData;
 
 struct MediaCodecSource : public MediaSource,
                           public MediaBufferObserver {
     enum FlagBits {
         FLAG_USE_SURFACE_INPUT      = 1,
-        FLAG_USE_METADATA_INPUT     = 2,
+        FLAG_PREFER_SOFTWARE_CODEC  = 4,  // used for testing only
     };
 
     static sp<MediaCodecSource> Create(
             const sp<ALooper> &looper,
             const sp<AMessage> &format,
             const sp<MediaSource> &source,
+            const sp<IGraphicBufferConsumer> &consumer = NULL,
             uint32_t flags = 0);
 
     bool isVideo() const { return mIsVideo; }
     sp<IGraphicBufferProducer> getGraphicBufferProducer();
+    status_t setInputBufferTimeOffset(int64_t timeOffsetUs);
+    int64_t getFirstSampleSystemTimeUs();
 
     // MediaSource
     virtual status_t start(MetaData *params = NULL);
     virtual status_t stop();
     virtual status_t pause();
-    virtual sp<MetaData> getFormat() { return mMeta; }
+    virtual sp<MetaData> getFormat();
     virtual status_t read(
             MediaBuffer **buffer,
             const ReadOptions *options = NULL);
@@ -72,15 +79,20 @@ private:
         kWhatStart,
         kWhatStop,
         kWhatPause,
+        kWhatSetInputBufferTimeOffset,
+        kWhatGetFirstSampleSystemTimeUs,
+        kWhatStopStalled,
     };
 
     MediaCodecSource(
             const sp<ALooper> &looper,
             const sp<AMessage> &outputFormat,
             const sp<MediaSource> &source,
+            const sp<IGraphicBufferConsumer> &consumer,
             uint32_t flags = 0);
 
     status_t onStart(MetaData *params);
+    void onPause();
     status_t init();
     status_t initEncoder();
     void releaseEncoder();
@@ -95,31 +107,42 @@ private:
     sp<ALooper> mCodecLooper;
     sp<AHandlerReflector<MediaCodecSource> > mReflector;
     sp<AMessage> mOutputFormat;
-    sp<MetaData> mMeta;
+    Mutexed<sp<MetaData>> mMeta;
     sp<Puller> mPuller;
     sp<MediaCodec> mEncoder;
     uint32_t mFlags;
-    List<uint32_t> mStopReplyIDQueue;
+    List<sp<AReplyToken>> mStopReplyIDQueue;
     bool mIsVideo;
     bool mStarted;
     bool mStopping;
     bool mDoMoreWorkPending;
+    bool mSetEncoderFormat;
+    int32_t mEncoderFormat;
+    int32_t mEncoderDataSpace;
     sp<AMessage> mEncoderActivityNotify;
     sp<IGraphicBufferProducer> mGraphicBufferProducer;
+    sp<IGraphicBufferConsumer> mGraphicBufferConsumer;
     List<MediaBuffer *> mInputBufferQueue;
     List<size_t> mAvailEncoderInputIndices;
     List<int64_t> mDecodingTimeQueue; // decoding time (us) for video
+    int64_t mInputBufferTimeOffsetUs;
+    int64_t mFirstSampleSystemTimeUs;
+    bool mPausePending;
 
     // audio drift time
     int64_t mFirstSampleTimeUs;
     List<int64_t> mDriftTimeQueue;
 
-    // following variables are protected by mOutputBufferLock
-    Mutex mOutputBufferLock;
-    Condition mOutputBufferCond;
-    List<MediaBuffer*> mOutputBufferQueue;
-    bool mEncoderReachedEOS;
-    status_t mErrorCode;
+    struct Output {
+        Output();
+        List<MediaBuffer*> mBufferQueue;
+        bool mEncoderReachedEOS;
+        status_t mErrorCode;
+        Condition mCond;
+    };
+    Mutexed<Output> mOutput;
+
+    int32_t mGeneration;
 
     DISALLOW_EVIL_CONSTRUCTORS(MediaCodecSource);
 };

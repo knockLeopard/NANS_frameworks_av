@@ -23,19 +23,6 @@
 
 #define PREF_16_VEC 129     /* 1MV bias versus 4MVs*/
 
-const static int distance_tab[9][9] =   /* [hp_guess][k] */
-{
-    {0, 1, 1, 1, 1, 1, 1, 1, 1},
-    {1, 0, 1, 2, 3, 4, 3, 2, 1},
-    {1, 0, 0, 0, 1, 2, 3, 2, 1},
-    {1, 2, 1, 0, 1, 2, 3, 4, 3},
-    {1, 2, 1, 0, 0, 0, 1, 2, 3},
-    {1, 4, 3, 2, 1, 0, 1, 2, 3},
-    {1, 2, 3, 2, 1, 0, 0, 0, 1},
-    {1, 2, 3, 4, 3, 2, 1, 0, 1},
-    {1, 0, 1, 2, 3, 2, 1, 0, 0}
-};
-
 #define CLIP_RESULT(x)      if((uint)x > 0xFF){ \
                  x = 0xFF & (~(x>>31));}
 
@@ -151,8 +138,7 @@ void GenerateHalfPelPred(uint8* subpel_pred, uint8 *ncand, int lx)
     uint8 tmp8;
     int32 tmp32;
     int16 tmp_horz[18*22], *dst_16, *src_16;
-    register int a = 0, b = 0, c = 0, d = 0, e = 0, f = 0; // temp register
-    int msk;
+    int a = 0, b = 0, c = 0, d = 0, e = 0, f = 0; // temp
     int i, j;
 
     /* first copy full-pel to the first array */
@@ -379,7 +365,6 @@ void GenerateHalfPelPred(uint8* subpel_pred, uint8 *ncand, int lx)
     // one can just use the above code and change the for(i=2 to for(i=18
     for (i = 16; i > 0; i -= 4)
     {
-        msk = 0;
         for (j = 17; j > 0; j--)
         {
             a = *((uint32*)ref); /* load 4 bytes */

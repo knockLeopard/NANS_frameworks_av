@@ -21,13 +21,14 @@
 #include "OMX.h"
 
 #include <utils/RefBase.h>
+#include <utils/SortedVector.h>
 #include <utils/threads.h>
 
 namespace android {
 
 class IOMXObserver;
 struct OMXMaster;
-struct GraphicBufferSource;
+class GraphicBufferSource;
 
 struct OMXNodeInstance {
     OMXNodeInstance(
@@ -52,11 +53,12 @@ struct OMXNodeInstance {
 
     status_t getState(OMX_STATETYPE* state);
 
-    status_t enableGraphicBuffers(OMX_U32 portIndex, OMX_BOOL enable);
+    status_t enableNativeBuffers(OMX_U32 portIndex, OMX_BOOL graphic, OMX_BOOL enable);
 
     status_t getGraphicBufferUsage(OMX_U32 portIndex, OMX_U32* usage);
 
-    status_t storeMetaDataInBuffers(OMX_U32 portIndex, OMX_BOOL enable);
+    status_t storeMetaDataInBuffers(
+            OMX_U32 portIndex, OMX_BOOL enable, MetadataBufferType *type);
 
     status_t prepareForAdaptivePlayback(
             OMX_U32 portIndex, OMX_BOOL enable,
@@ -68,7 +70,7 @@ struct OMXNodeInstance {
 
     status_t useBuffer(
             OMX_U32 portIndex, const sp<IMemory> &params,
-            OMX::buffer_id *buffer);
+            OMX::buffer_id *buffer, OMX_U32 allottedSize);
 
     status_t useGraphicBuffer(
             OMX_U32 portIndex, const sp<GraphicBuffer> &graphicBuffer,
@@ -78,32 +80,47 @@ struct OMXNodeInstance {
             OMX_U32 portIndex, const sp<GraphicBuffer> &graphicBuffer,
             OMX::buffer_id buffer);
 
+    status_t updateNativeHandleInMeta(
+            OMX_U32 portIndex, const sp<NativeHandle> &nativeHandle,
+            OMX::buffer_id buffer);
+
     status_t createInputSurface(
-            OMX_U32 portIndex, sp<IGraphicBufferProducer> *bufferProducer);
+            OMX_U32 portIndex, android_dataspace dataSpace,
+            sp<IGraphicBufferProducer> *bufferProducer,
+            MetadataBufferType *type);
+
+    static status_t createPersistentInputSurface(
+            sp<IGraphicBufferProducer> *bufferProducer,
+            sp<IGraphicBufferConsumer> *bufferConsumer);
+
+    status_t setInputSurface(
+            OMX_U32 portIndex, const sp<IGraphicBufferConsumer> &bufferConsumer,
+            MetadataBufferType *type);
 
     status_t signalEndOfInputStream();
 
-    status_t allocateBuffer(
+    void signalEvent(OMX_EVENTTYPE event, OMX_U32 arg1, OMX_U32 arg2);
+
+    status_t allocateSecureBuffer(
             OMX_U32 portIndex, size_t size, OMX::buffer_id *buffer,
-            void **buffer_data);
+            void **buffer_data, sp<NativeHandle> *native_handle);
 
     status_t allocateBufferWithBackup(
             OMX_U32 portIndex, const sp<IMemory> &params,
-            OMX::buffer_id *buffer);
+            OMX::buffer_id *buffer, OMX_U32 allottedSize);
 
     status_t freeBuffer(OMX_U32 portIndex, OMX::buffer_id buffer);
 
-    status_t fillBuffer(OMX::buffer_id buffer);
+    status_t fillBuffer(OMX::buffer_id buffer, int fenceFd);
 
     status_t emptyBuffer(
             OMX::buffer_id buffer,
             OMX_U32 rangeOffset, OMX_U32 rangeLength,
-            OMX_U32 flags, OMX_TICKS timestamp);
+            OMX_U32 flags, OMX_TICKS timestamp, int fenceFd);
 
-    status_t emptyDirectBuffer(
-            OMX_BUFFERHEADERTYPE *header,
-            OMX_U32 rangeOffset, OMX_U32 rangeLength,
-            OMX_U32 flags, OMX_TICKS timestamp);
+    status_t emptyGraphicBuffer(
+            OMX_BUFFERHEADERTYPE *header, const sp<GraphicBuffer> &buffer,
+            OMX_U32 flags, OMX_TICKS timestamp, int fenceFd);
 
     status_t getExtensionIndex(
             const char *parameterName, OMX_INDEXTYPE *index);
@@ -114,6 +131,12 @@ struct OMXNodeInstance {
             const void *data,
             size_t size);
 
+    bool isSecure() const {
+        return mIsSecure;
+    }
+
+    // handles messages and removes them from the list
+    void onMessages(std::list<omx_message> &messages);
     void onMessage(const omx_message &msg);
     void onObserverDied(OMXMaster *master);
     void onGetHandleFailed();
@@ -129,6 +152,10 @@ private:
     OMX_HANDLETYPE mHandle;
     sp<IOMXObserver> mObserver;
     bool mDying;
+    bool mSailed;  // configuration is set (no more meta-mode changes)
+    bool mQueriedProhibitedExtensions;
+    SortedVector<OMX_INDEXTYPE> mProhibitedExtensions;
+    bool mIsSecure;
 
     // Lock only covers mGraphicBufferSource.  We can't always use mLock
     // because of rare instances where we'd end up locking it recursively.
@@ -147,6 +174,15 @@ private:
     uint32_t mBufferIDCount;
     KeyedVector<OMX::buffer_id, OMX_BUFFERHEADERTYPE *> mBufferIDToBufferHeader;
     KeyedVector<OMX_BUFFERHEADERTYPE *, OMX::buffer_id> mBufferHeaderToBufferID;
+
+    // metadata and secure buffer type tracking
+    MetadataBufferType mMetadataType[2];
+    enum SecureBufferType {
+        kSecureBufferTypeUnknown,
+        kSecureBufferTypeOpaque,
+        kSecureBufferTypeNativeHandle,
+    };
+    SecureBufferType mSecureBufferType[2];
 
     // For debug support
     char *mName;
@@ -168,9 +204,11 @@ private:
 
     // For buffer id management
     OMX::buffer_id makeBufferID(OMX_BUFFERHEADERTYPE *bufferHeader);
-    OMX_BUFFERHEADERTYPE *findBufferHeader(OMX::buffer_id buffer);
+    OMX_BUFFERHEADERTYPE *findBufferHeader(OMX::buffer_id buffer, OMX_U32 portIndex);
     OMX::buffer_id findBufferID(OMX_BUFFERHEADERTYPE *bufferHeader);
     void invalidateBufferID(OMX::buffer_id buffer);
+
+    bool isProhibitedIndex_l(OMX_INDEXTYPE index);
 
     status_t useGraphicBuffer2_l(
             OMX_U32 portIndex, const sp<GraphicBuffer> &graphicBuffer,
@@ -194,15 +232,39 @@ private:
             OMX_IN OMX_BUFFERHEADERTYPE *pBuffer);
 
     status_t storeMetaDataInBuffers_l(
-            OMX_U32 portIndex, OMX_BOOL enable,
-            OMX_BOOL useGraphicBuffer, OMX_BOOL *usingGraphicBufferInMeta);
+            OMX_U32 portIndex, OMX_BOOL enable, MetadataBufferType *type);
+
+    // Stores fence into buffer if it is ANWBuffer type and has enough space.
+    // otherwise, waits for the fence to signal.  Takes ownership of |fenceFd|.
+    status_t storeFenceInMeta_l(
+            OMX_BUFFERHEADERTYPE *header, int fenceFd, OMX_U32 portIndex);
+
+    // Retrieves the fence from buffer if ANWBuffer type and has enough space. Otherwise, returns -1
+    int retrieveFenceFromMeta_l(
+            OMX_BUFFERHEADERTYPE *header, OMX_U32 portIndex);
 
     status_t emptyBuffer_l(
             OMX_BUFFERHEADERTYPE *header,
-            OMX_U32 flags, OMX_TICKS timestamp, intptr_t debugAddr);
+            OMX_U32 flags, OMX_TICKS timestamp, intptr_t debugAddr, int fenceFd);
 
+    // Updates the graphic buffer handle in the metadata buffer for |buffer| and |header| to
+    // |graphicBuffer|'s handle. If |updateCodecBuffer| is true, the update will happen in
+    // the actual codec buffer (use this if not using emptyBuffer (with no _l) later to
+    // pass the buffer to the codec, as only emptyBuffer copies the backup buffer to the codec
+    // buffer.)
+    status_t updateGraphicBufferInMeta_l(
+            OMX_U32 portIndex, const sp<GraphicBuffer> &graphicBuffer,
+            OMX::buffer_id buffer, OMX_BUFFERHEADERTYPE *header, bool updateCodecBuffer);
+
+    status_t createGraphicBufferSource(
+            OMX_U32 portIndex, sp<IGraphicBufferConsumer> consumer /* nullable */,
+            MetadataBufferType *type);
     sp<GraphicBufferSource> getGraphicBufferSource();
     void setGraphicBufferSource(const sp<GraphicBufferSource>& bufferSource);
+
+    // Handles |msg|, and may modify it. Returns true iff completely handled it and
+    // |msg| does not need to be sent to the event listener.
+    bool handleMessage(omx_message &msg);
 
     OMXNodeInstance(const OMXNodeInstance &);
     OMXNodeInstance &operator=(const OMXNodeInstance &);

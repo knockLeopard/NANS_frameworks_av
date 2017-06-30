@@ -282,7 +282,6 @@ void AudioResamplerDyn<TC, TI, TO>::setSampleRate(int32_t inSampleRate)
         return;
     }
     int32_t oldSampleRate = mInSampleRate;
-    int32_t oldHalfNumCoefs = mConstants.mHalfNumCoefs;
     uint32_t oldPhaseWrapLimit = mConstants.mL << mConstants.mShift;
     bool useS32 = false;
 
@@ -477,15 +476,15 @@ void AudioResamplerDyn<TC, TI, TO>::setSampleRate(int32_t inSampleRate)
 }
 
 template<typename TC, typename TI, typename TO>
-void AudioResamplerDyn<TC, TI, TO>::resample(int32_t* out, size_t outFrameCount,
+size_t AudioResamplerDyn<TC, TI, TO>::resample(int32_t* out, size_t outFrameCount,
             AudioBufferProvider* provider)
 {
-    (this->*mResampleFunc)(reinterpret_cast<TO*>(out), outFrameCount, provider);
+    return (this->*mResampleFunc)(reinterpret_cast<TO*>(out), outFrameCount, provider);
 }
 
 template<typename TC, typename TI, typename TO>
 template<int CHANNELS, bool LOCKED, int STRIDE>
-void AudioResamplerDyn<TC, TI, TO>::resample(TO* out, size_t outFrameCount,
+size_t AudioResamplerDyn<TC, TI, TO>::resample(TO* out, size_t outFrameCount,
         AudioBufferProvider* provider)
 {
     // TODO Mono -> Mono is not supported. OUTPUT_CHANNELS reflects minimum of stereo out.
@@ -527,8 +526,7 @@ void AudioResamplerDyn<TC, TI, TO>::resample(TO* out, size_t outFrameCount,
         // We may not fetch a new buffer if the existing data is sufficient.
         while (mBuffer.frameCount == 0 && inFrameCount > 0) {
             mBuffer.frameCount = inFrameCount;
-            provider->getNextBuffer(&mBuffer,
-                    calculateOutputPTS(outputIndex / OUTPUT_CHANNELS));
+            provider->getNextBuffer(&mBuffer);
             if (mBuffer.raw == NULL) {
                 goto resample_exit;
             }
@@ -610,6 +608,7 @@ resample_exit:
     ALOG_ASSERT(mBuffer.frameCount == 0); // there must be no frames in the buffer
     mInBuffer.setImpulse(impulse);
     mPhaseFraction = phaseFraction;
+    return outputIndex / OUTPUT_CHANNELS;
 }
 
 /* instantiate templates used by AudioResampler::create */
@@ -618,4 +617,4 @@ template class AudioResamplerDyn<int16_t, int16_t, int32_t>;
 template class AudioResamplerDyn<int32_t, int16_t, int32_t>;
 
 // ----------------------------------------------------------------------------
-}; // namespace android
+} // namespace android

@@ -25,6 +25,9 @@
 
 namespace android {
 
+// Maximum command/reply size expected
+#define EFFECT_PARAM_SIZE_MAX       65536
+
 enum {
     ENABLE = IBinder::FIRST_CALL_TRANSACTION,
     DISABLE,
@@ -85,13 +88,15 @@ public:
         data.writeInt32(size);
 
         status_t status = remote()->transact(COMMAND, data, &reply);
+        if (status == NO_ERROR) {
+            status = reply.readInt32();
+        }
         if (status != NO_ERROR) {
             if (pReplySize != NULL)
                 *pReplySize = 0;
             return status;
         }
 
-        status = reply.readInt32();
         size = reply.readInt32();
         if (size != 0 && pReplyData != NULL && pReplySize != NULL) {
             reply.read(pReplyData, size);
@@ -154,23 +159,43 @@ status_t BnEffect::onTransact(
             uint32_t cmdSize = data.readInt32();
             char *cmd = NULL;
             if (cmdSize) {
-                cmd = (char *)malloc(cmdSize);
+                if (cmdSize > EFFECT_PARAM_SIZE_MAX) {
+                    reply->writeInt32(NO_MEMORY);
+                    return NO_ERROR;
+                }
+                cmd = (char *)calloc(cmdSize, 1);
+                if (cmd == NULL) {
+                    reply->writeInt32(NO_MEMORY);
+                    return NO_ERROR;
+                }
                 data.read(cmd, cmdSize);
             }
             uint32_t replySize = data.readInt32();
             uint32_t replySz = replySize;
             char *resp = NULL;
             if (replySize) {
-                resp = (char *)malloc(replySize);
+                if (replySize > EFFECT_PARAM_SIZE_MAX) {
+                    free(cmd);
+                    reply->writeInt32(NO_MEMORY);
+                    return NO_ERROR;
+                }
+                resp = (char *)calloc(replySize, 1);
+                if (resp == NULL) {
+                    free(cmd);
+                    reply->writeInt32(NO_MEMORY);
+                    return NO_ERROR;
+                }
             }
             status_t status = command(cmdCode, cmdSize, cmd, &replySz, resp);
             reply->writeInt32(status);
-            if (replySz < replySize) {
-                replySize = replySz;
-            }
-            reply->writeInt32(replySize);
-            if (replySize) {
-                reply->write(resp, replySize);
+            if (status == NO_ERROR) {
+                if (replySz < replySize) {
+                    replySize = replySz;
+                }
+                reply->writeInt32(replySize);
+                if (replySize) {
+                    reply->write(resp, replySize);
+                }
             }
             if (cmd) {
                 free(cmd);
@@ -190,7 +215,7 @@ status_t BnEffect::onTransact(
 
         case GET_CBLK: {
             CHECK_INTERFACE(IEffect, data, reply);
-            reply->writeStrongBinder(getCblk()->asBinder());
+            reply->writeStrongBinder(IInterface::asBinder(getCblk()));
             return NO_ERROR;
         } break;
 
@@ -201,4 +226,4 @@ status_t BnEffect::onTransact(
 
 // ----------------------------------------------------------------------------
 
-}; // namespace android
+} // namespace android

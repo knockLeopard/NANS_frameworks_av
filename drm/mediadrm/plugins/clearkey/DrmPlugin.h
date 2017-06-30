@@ -49,12 +49,13 @@ public:
 
     virtual status_t getKeyRequest(
             const Vector<uint8_t>& scope,
-            const Vector<uint8_t>& initData,
+            const Vector<uint8_t>& mimeType,
             const String8& initDataType,
             KeyType keyType,
             const KeyedVector<String8, String8>& optionalParameters,
             Vector<uint8_t>& request,
-            String8& defaultUrl);
+            String8& defaultUrl,
+            DrmPlugin::KeyRequestType *keyRequestType);
 
     virtual status_t provideKeyResponse(
             const Vector<uint8_t>& scope,
@@ -101,10 +102,6 @@ public:
         UNUSED(response);
         UNUSED(certificate);
         UNUSED(wrappedKey);
-        return android::ERROR_DRM_CANNOT_HANDLE;
-    }
-
-    virtual status_t unprovisionDevice() {
         return android::ERROR_DRM_CANNOT_HANDLE;
     }
 

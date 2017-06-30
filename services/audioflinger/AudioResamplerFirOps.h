@@ -25,11 +25,15 @@ namespace android {
 #define USE_INLINE_ASSEMBLY (false)
 #endif
 
-#if USE_INLINE_ASSEMBLY && defined(__ARM_NEON__)
+#if defined(__aarch64__) || defined(__ARM_NEON__)
+#ifndef USE_NEON
 #define USE_NEON (true)
-#include <arm_neon.h>
+#endif
 #else
 #define USE_NEON (false)
+#endif
+#if USE_NEON
+#include <arm_neon.h>
 #endif
 
 template<typename T, typename U>
@@ -158,6 +162,6 @@ int32_t mulAddRL(int left, uint32_t inRL, int32_t v, int32_t a)
 #endif
 }
 
-}; // namespace android
+} // namespace android
 
 #endif /*ANDROID_AUDIO_RESAMPLER_FIR_OPS_H*/

@@ -20,24 +20,45 @@
 #include <utils/Log.h>
 #include <utils/threads.h>
 #include <utils/Mutex.h>
+#include <cutils/properties.h>
+
+#include <android/hardware/ICameraService.h>
 
 #include <binder/IPCThreadState.h>
 #include <binder/IServiceManager.h>
 #include <binder/IMemory.h>
 
 #include <camera/CameraBase.h>
-#include <camera/ICameraService.h>
 
 // needed to instantiate
-#include <camera/ProCamera.h>
 #include <camera/Camera.h>
 
 #include <system/camera_metadata.h>
 
 namespace android {
 
+namespace hardware {
+
+status_t CameraInfo::writeToParcel(Parcel* parcel) const {
+    status_t res;
+    res = parcel->writeInt32(facing);
+    if (res != OK) return res;
+    res = parcel->writeInt32(orientation);
+    return res;
+}
+
+status_t CameraInfo::readFromParcel(const Parcel* parcel) {
+    status_t res;
+    res = parcel->readInt32(&facing);
+    if (res != OK) return res;
+    res = parcel->readInt32(&orientation);
+    return res;
+}
+
+}
+
 namespace {
-    sp<ICameraService>        gCameraService;
+    sp<::android::hardware::ICameraService> gCameraService;
     const int                 kCameraServicePollDelay = 500000; // 0.5s
     const char*               kCameraServiceName      = "media.camera";
 
@@ -66,10 +87,16 @@ namespace {
 
 // establish binder interface to camera service
 template <typename TCam, typename TCamTraits>
-const sp<ICameraService>& CameraBase<TCam, TCamTraits>::getCameraService()
+const sp<::android::hardware::ICameraService> CameraBase<TCam, TCamTraits>::getCameraService()
 {
     Mutex::Autolock _l(gLock);
     if (gCameraService.get() == 0) {
+        char value[PROPERTY_VALUE_MAX];
+        property_get("config.disable_cameraservice", value, "0");
+        if (strncmp(value, "0", 2) != 0 && strncasecmp(value, "false", 6) != 0) {
+            return gCameraService;
+        }
+
         sp<IServiceManager> sm = defaultServiceManager();
         sp<IBinder> binder;
         do {
@@ -84,7 +111,7 @@ const sp<ICameraService>& CameraBase<TCam, TCamTraits>::getCameraService()
             gDeathNotifier = new DeathNotifier();
         }
         binder->linkToDeath(gDeathNotifier);
-        gCameraService = interface_cast<ICameraService>(binder);
+        gCameraService = interface_cast<::android::hardware::ICameraService>(binder);
     }
     ALOGE_IF(gCameraService == 0, "no CameraService!?");
     return gCameraService;
@@ -93,24 +120,25 @@ const sp<ICameraService>& CameraBase<TCam, TCamTraits>::getCameraService()
 template <typename TCam, typename TCamTraits>
 sp<TCam> CameraBase<TCam, TCamTraits>::connect(int cameraId,
                                                const String16& clientPackageName,
-                                               int clientUid)
+                                               int clientUid, int clientPid)
 {
     ALOGV("%s: connect", __FUNCTION__);
     sp<TCam> c = new TCam(cameraId);
     sp<TCamCallbacks> cl = c;
-    status_t status = NO_ERROR;
-    const sp<ICameraService>& cs = getCameraService();
+    const sp<::android::hardware::ICameraService> cs = getCameraService();
 
-    if (cs != 0) {
+    binder::Status ret;
+    if (cs != nullptr) {
         TCamConnectService fnConnectService = TCamTraits::fnConnectService;
-        status = (cs.get()->*fnConnectService)(cl, cameraId, clientPackageName, clientUid,
-                                             /*out*/ c->mCamera);
+        ret = (cs.get()->*fnConnectService)(cl, cameraId, clientPackageName, clientUid,
+                                               clientPid, /*out*/ &c->mCamera);
     }
-    if (status == OK && c->mCamera != 0) {
-        c->mCamera->asBinder()->linkToDeath(c);
+    if (ret.isOk() && c->mCamera != nullptr) {
+        IInterface::asBinder(c->mCamera)->linkToDeath(c);
         c->mStatus = NO_ERROR;
     } else {
-        ALOGW("An error occurred while connecting to camera: %d", cameraId);
+        ALOGW("An error occurred while connecting to camera %d: %s", cameraId,
+                (cs != nullptr) ? "Service not available" : ret.toString8().string());
         c.clear();
     }
     return c;
@@ -122,7 +150,7 @@ void CameraBase<TCam, TCamTraits>::disconnect()
     ALOGV("%s: disconnect", __FUNCTION__);
     if (mCamera != 0) {
         mCamera->disconnect();
-        mCamera->asBinder()->unlinkToDeath(this);
+        IInterface::asBinder(mCamera)->unlinkToDeath(this);
         mCamera = 0;
     }
     ALOGV("%s: disconnect (done)", __FUNCTION__);
@@ -183,41 +211,52 @@ void CameraBase<TCam, TCamTraits>::notifyCallback(int32_t msgType,
 
 template <typename TCam, typename TCamTraits>
 int CameraBase<TCam, TCamTraits>::getNumberOfCameras() {
-    const sp<ICameraService> cs = getCameraService();
+    const sp<::android::hardware::ICameraService> cs = getCameraService();
 
     if (!cs.get()) {
         // as required by the public Java APIs
         return 0;
     }
-    return cs->getNumberOfCameras();
+    int32_t count;
+    binder::Status res = cs->getNumberOfCameras(
+            ::android::hardware::ICameraService::CAMERA_TYPE_BACKWARD_COMPATIBLE,
+            &count);
+    if (!res.isOk()) {
+        ALOGE("Error reading number of cameras: %s",
+                res.toString8().string());
+        count = 0;
+    }
+    return count;
 }
 
 // this can be in BaseCamera but it should be an instance method
 template <typename TCam, typename TCamTraits>
 status_t CameraBase<TCam, TCamTraits>::getCameraInfo(int cameraId,
-                               struct CameraInfo* cameraInfo) {
-    const sp<ICameraService>& cs = getCameraService();
+        struct hardware::CameraInfo* cameraInfo) {
+    const sp<::android::hardware::ICameraService> cs = getCameraService();
     if (cs == 0) return UNKNOWN_ERROR;
-    return cs->getCameraInfo(cameraId, cameraInfo);
+    binder::Status res = cs->getCameraInfo(cameraId, cameraInfo);
+    return res.isOk() ? OK : res.serviceSpecificErrorCode();
 }
 
 template <typename TCam, typename TCamTraits>
 status_t CameraBase<TCam, TCamTraits>::addServiceListener(
-                            const sp<ICameraServiceListener>& listener) {
-    const sp<ICameraService>& cs = getCameraService();
+        const sp<::android::hardware::ICameraServiceListener>& listener) {
+    const sp<::android::hardware::ICameraService>& cs = getCameraService();
     if (cs == 0) return UNKNOWN_ERROR;
-    return cs->addListener(listener);
+    binder::Status res = cs->addListener(listener);
+    return res.isOk() ? OK : res.serviceSpecificErrorCode();
 }
 
 template <typename TCam, typename TCamTraits>
 status_t CameraBase<TCam, TCamTraits>::removeServiceListener(
-                            const sp<ICameraServiceListener>& listener) {
-    const sp<ICameraService>& cs = getCameraService();
+        const sp<::android::hardware::ICameraServiceListener>& listener) {
+    const sp<::android::hardware::ICameraService>& cs = getCameraService();
     if (cs == 0) return UNKNOWN_ERROR;
-    return cs->removeListener(listener);
+    binder::Status res = cs->removeListener(listener);
+    return res.isOk() ? OK : res.serviceSpecificErrorCode();
 }
 
-template class CameraBase<ProCamera>;
 template class CameraBase<Camera>;
 
 } // namespace android

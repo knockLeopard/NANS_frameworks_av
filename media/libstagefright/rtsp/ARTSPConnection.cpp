@@ -42,7 +42,7 @@ const int64_t ARTSPConnection::kSelectTimeoutUs = 1000ll;
 
 // static
 const AString ARTSPConnection::sUserAgent =
-    StringPrintf("User-Agent: %s\r\n", MakeUserAgent().c_str());
+    AStringPrintf("User-Agent: %s\r\n", MakeUserAgent().c_str());
 
 ARTSPConnection::ARTSPConnection(bool uidValid, uid_t uid)
     : mUIDValid(uidValid),
@@ -68,28 +68,28 @@ ARTSPConnection::~ARTSPConnection() {
 }
 
 void ARTSPConnection::connect(const char *url, const sp<AMessage> &reply) {
-    sp<AMessage> msg = new AMessage(kWhatConnect, id());
+    sp<AMessage> msg = new AMessage(kWhatConnect, this);
     msg->setString("url", url);
     msg->setMessage("reply", reply);
     msg->post();
 }
 
 void ARTSPConnection::disconnect(const sp<AMessage> &reply) {
-    sp<AMessage> msg = new AMessage(kWhatDisconnect, id());
+    sp<AMessage> msg = new AMessage(kWhatDisconnect, this);
     msg->setMessage("reply", reply);
     msg->post();
 }
 
 void ARTSPConnection::sendRequest(
         const char *request, const sp<AMessage> &reply) {
-    sp<AMessage> msg = new AMessage(kWhatSendRequest, id());
+    sp<AMessage> msg = new AMessage(kWhatSendRequest, this);
     msg->setString("request", request);
     msg->setMessage("reply", reply);
     msg->post();
 }
 
 void ARTSPConnection::observeBinaryData(const sp<AMessage> &reply) {
-    sp<AMessage> msg = new AMessage(kWhatObserveBinaryData, id());
+    sp<AMessage> msg = new AMessage(kWhatObserveBinaryData, this);
     msg->setMessage("reply", reply);
     msg->post();
 }
@@ -286,7 +286,7 @@ void ARTSPConnection::onConnect(const sp<AMessage> &msg) {
 
     if (err < 0) {
         if (errno == EINPROGRESS) {
-            sp<AMessage> msg = new AMessage(kWhatCompleteConnection, id());
+            sp<AMessage> msg = new AMessage(kWhatCompleteConnection, this);
             msg->setMessage("reply", reply);
             msg->setInt32("connection-id", mConnectionID);
             msg->post();
@@ -523,7 +523,7 @@ void ARTSPConnection::postReceiveReponseEvent() {
         return;
     }
 
-    sp<AMessage> msg = new AMessage(kWhatReceiveResponse, id());
+    sp<AMessage> msg = new AMessage(kWhatReceiveResponse, this);
     msg->post();
 
     mReceiveResponseEventPending = true;
@@ -746,7 +746,7 @@ bool ARTSPConnection::receiveRTSPReponse() {
             AString request;
             CHECK(reply->findString("original-request", &request));
 
-            sp<AMessage> msg = new AMessage(kWhatSendRequest, id());
+            sp<AMessage> msg = new AMessage(kWhatSendRequest, this);
             msg->setMessage("reply", reply);
             msg->setString("request", request.c_str(), request.size());
 
@@ -898,11 +898,6 @@ bool ARTSPConnection::parseAuthMethod(const sp<ARTSPResponse> &response) {
     if (!strncmp(value.c_str(), "Basic", 5)) {
         mAuthType = BASIC;
     } else {
-#if !defined(HAVE_ANDROID_OS)
-        // We don't have access to the MD5 implementation on the simulator,
-        // so we won't support digest authentication.
-        return false;
-#endif
 
         CHECK(!strncmp(value.c_str(), "Digest", 6));
         mAuthType = DIGEST;
@@ -919,7 +914,6 @@ bool ARTSPConnection::parseAuthMethod(const sp<ARTSPResponse> &response) {
     return true;
 }
 
-#if defined(HAVE_ANDROID_OS)
 static void H(const AString &s, AString *out) {
     out->clear();
 
@@ -948,7 +942,6 @@ static void H(const AString &s, AString *out) {
         out->append(&nibble, 1);
     }
 }
-#endif
 
 static void GetMethodAndURL(
         const AString &request, AString *method, AString *url) {
@@ -990,7 +983,6 @@ void ARTSPConnection::addAuthentication(AString *request) {
         return;
     }
 
-#if defined(HAVE_ANDROID_OS)
     CHECK_EQ((int)mAuthType, (int)DIGEST);
 
     AString method, url;
@@ -1039,7 +1031,6 @@ void ARTSPConnection::addAuthentication(AString *request) {
     fragment.append("\r\n");
 
     request->insert(fragment, i + 2);
-#endif
 }
 
 void ARTSPConnection::addUserAgent(AString *request) const {

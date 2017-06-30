@@ -11,7 +11,6 @@ LOCAL_SRC_FILES := \
     MonoPipeReader.cpp              \
     Pipe.cpp                        \
     PipeReader.cpp                  \
-    roundup.c                       \
     SourceAudioBufferProvider.cpp
 
 LOCAL_SRC_FILES += NBLog.cpp
@@ -21,18 +20,17 @@ LOCAL_SRC_FILES += NBLog.cpp
 #LOCAL_C_INCLUDES += path/to/libsndfile/src
 #LOCAL_STATIC_LIBRARIES += libsndfile
 
-# uncomment for systrace
-# LOCAL_CFLAGS += -DATRACE_TAG=ATRACE_TAG_AUDIO
-
 LOCAL_MODULE := libnbaio
 
 LOCAL_SHARED_LIBRARIES := \
+    libaudioutils \
     libbinder \
-    libcommon_time_client \
     libcutils \
     libutils \
     liblog
 
-LOCAL_STATIC_LIBRARIES += libinstantssq
+LOCAL_C_INCLUDES := $(call include-path-for, audio-utils)
+
+LOCAL_CFLAGS := -Werror -Wall
 
 include $(BUILD_SHARED_LIBRARY)

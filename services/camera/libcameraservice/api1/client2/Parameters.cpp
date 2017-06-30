@@ -30,6 +30,7 @@
 #include "Parameters.h"
 #include "system/camera.h"
 #include "hardware/camera_common.h"
+#include <android/hardware/ICamera.h>
 #include <media/MediaProfiles.h>
 #include <media/mediarecorder.h>
 
@@ -65,15 +66,29 @@ status_t Parameters::initialize(const CameraMetadata *info, int deviceVersion) {
     const Size MAX_PREVIEW_SIZE = { MAX_PREVIEW_WIDTH, MAX_PREVIEW_HEIGHT };
     // Treat the H.264 max size as the max supported video size.
     MediaProfiles *videoEncoderProfiles = MediaProfiles::getInstance();
-    int32_t maxVideoWidth = videoEncoderProfiles->getVideoEncoderParamByName(
-                            "enc.vid.width.max", VIDEO_ENCODER_H264);
-    int32_t maxVideoHeight = videoEncoderProfiles->getVideoEncoderParamByName(
-                            "enc.vid.height.max", VIDEO_ENCODER_H264);
-    const Size MAX_VIDEO_SIZE = {maxVideoWidth, maxVideoHeight};
+    Vector<video_encoder> encoders = videoEncoderProfiles->getVideoEncoders();
+    int32_t maxVideoWidth = 0;
+    int32_t maxVideoHeight = 0;
+    for (size_t i = 0; i < encoders.size(); i++) {
+        int width = videoEncoderProfiles->getVideoEncoderParamByName(
+                "enc.vid.width.max", encoders[i]);
+        int height = videoEncoderProfiles->getVideoEncoderParamByName(
+                "enc.vid.height.max", encoders[i]);
+        // Treat width/height separately here to handle the case where different
+        // profile might report max size of different aspect ratio
+        if (width > maxVideoWidth) {
+            maxVideoWidth = width;
+        }
+        if (height > maxVideoHeight) {
+            maxVideoHeight = height;
+        }
+    }
+    // This is just an upper bound and may not be an actually valid video size
+    const Size VIDEO_SIZE_UPPER_BOUND = {maxVideoWidth, maxVideoHeight};
 
     res = getFilteredSizes(MAX_PREVIEW_SIZE, &availablePreviewSizes);
     if (res != OK) return res;
-    res = getFilteredSizes(MAX_VIDEO_SIZE, &availableVideoSizes);
+    res = getFilteredSizes(VIDEO_SIZE_UPPER_BOUND, &availableVideoSizes);
     if (res != OK) return res;
 
     // Select initial preview and video size that's under the initial bound and
@@ -182,9 +197,9 @@ status_t Parameters::initialize(const CameraMetadata *info, int deviceVersion) {
                 supportedPreviewFormats +=
                     CameraParameters::PIXEL_FORMAT_YUV420SP;
                 break;
-            // Not advertizing JPEG, RAW_SENSOR, etc, for preview formats
+            // Not advertizing JPEG, RAW16, etc, for preview formats
             case HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED:
-            case HAL_PIXEL_FORMAT_RAW_SENSOR:
+            case HAL_PIXEL_FORMAT_RAW16:
             case HAL_PIXEL_FORMAT_BLOB:
                 addComma = false;
                 break;
@@ -200,8 +215,8 @@ status_t Parameters::initialize(const CameraMetadata *info, int deviceVersion) {
                 supportedPreviewFormats);
     }
 
-    previewFpsRange[0] = availableFpsRanges.data.i32[0];
-    previewFpsRange[1] = availableFpsRanges.data.i32[1];
+    previewFpsRange[0] = fastInfo.bestStillCaptureFpsRange[0];
+    previewFpsRange[1] = fastInfo.bestStillCaptureFpsRange[1];
 
     // PREVIEW_FRAME_RATE / SUPPORTED_PREVIEW_FRAME_RATES are deprecated, but
     // still have to do something sane for them
@@ -223,6 +238,10 @@ status_t Parameters::initialize(const CameraMetadata *info, int deviceVersion) {
     {
         String8 supportedPreviewFpsRange;
         for (size_t i=0; i < availableFpsRanges.count; i += 2) {
+            if (!isFpsSupported(availablePreviewSizes,
+                HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED, availableFpsRanges.data.i32[i+1])) {
+                continue;
+            }
             if (i != 0) supportedPreviewFpsRange += ",";
             supportedPreviewFpsRange += String8::format("(%d,%d)",
                     availableFpsRanges.data.i32[i] * kFpsToApiScale,
@@ -240,7 +259,10 @@ status_t Parameters::initialize(const CameraMetadata *info, int deviceVersion) {
             // from the [min, max] fps range use the max value
             int fps = fpsFromRange(availableFpsRanges.data.i32[i],
                                    availableFpsRanges.data.i32[i+1]);
-
+            if (!isFpsSupported(availablePreviewSizes,
+                    HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED, fps)) {
+                continue;
+            }
             // de-dupe frame rates
             if (sortedPreviewFrameRates.indexOf(fps) == NAME_NOT_FOUND) {
                 sortedPreviewFrameRates.add(fps);
@@ -856,8 +878,9 @@ status_t Parameters::initialize(const CameraMetadata *info, int deviceVersion) {
     }
 
     // Set up initial state for non-Camera.Parameters state variables
-
-    storeMetadataInBuffers = true;
+    videoFormat = HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED;
+    videoDataSpace = HAL_DATASPACE_V0_BT709;
+    videoBufferMode = hardware::ICamera::VIDEO_BUFFER_MODE_DATA_CALLBACK_YUV;
     playShutterSound = true;
     enableFaceDetect = false;
 
@@ -875,16 +898,29 @@ status_t Parameters::initialize(const CameraMetadata *info, int deviceVersion) {
     previewCallbackOneShot = false;
     previewCallbackSurface = false;
 
-    char value[PROPERTY_VALUE_MAX];
-    property_get("camera.disable_zsl_mode", value, "0");
-    if (!strcmp(value,"1")) {
-        ALOGI("Camera %d: Disabling ZSL mode", cameraId);
-        zslMode = false;
-    } else {
-        zslMode = true;
+    Size maxJpegSize = getMaxSize(getAvailableJpegSizes());
+    int64_t minFrameDurationNs = getJpegStreamMinFrameDurationNs(maxJpegSize);
+
+    slowJpegMode = false;
+    if (minFrameDurationNs > kSlowJpegModeThreshold) {
+        slowJpegMode = true;
+        // Slow jpeg devices does not support video snapshot without
+        // slowing down preview.
+        // TODO: support video size video snapshot only?
+        params.set(CameraParameters::KEY_VIDEO_SNAPSHOT_SUPPORTED,
+            CameraParameters::FALSE);
     }
 
-    lightFx = LIGHTFX_NONE;
+    char value[PROPERTY_VALUE_MAX];
+    property_get("camera.disable_zsl_mode", value, "0");
+    if (!strcmp(value,"1") || slowJpegMode) {
+        ALOGI("Camera %d: Disabling ZSL mode", cameraId);
+        allowZslMode = false;
+    } else {
+        allowZslMode = true;
+    }
+
+    ALOGI("%s: allowZslMode: %d slowJpegMode %d", __FUNCTION__, allowZslMode, slowJpegMode);
 
     state = STOPPED;
 
@@ -922,21 +958,40 @@ status_t Parameters::buildFastInfo() {
         return NO_INIT;
     }
 
+    // Get supported preview fps ranges.
+    Vector<Size> supportedPreviewSizes;
+    Vector<FpsRange> supportedPreviewFpsRanges;
+    const Size PREVIEW_SIZE_BOUND = { MAX_PREVIEW_WIDTH, MAX_PREVIEW_HEIGHT };
+    status_t res = getFilteredSizes(PREVIEW_SIZE_BOUND, &supportedPreviewSizes);
+    if (res != OK) return res;
+    for (size_t i=0; i < availableFpsRanges.count; i += 2) {
+        if (!isFpsSupported(supportedPreviewSizes,
+                HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED, availableFpsRanges.data.i32[i+1])) {
+            continue;
+        }
+        FpsRange fpsRange = {availableFpsRanges.data.i32[i], availableFpsRanges.data.i32[i+1]};
+        supportedPreviewFpsRanges.add(fpsRange);
+    }
+    if (supportedPreviewFpsRanges.size() == 0) {
+        ALOGE("Supported preview fps range is empty");
+        return NO_INIT;
+    }
+
     int32_t bestStillCaptureFpsRange[2] = {
-        availableFpsRanges.data.i32[0], availableFpsRanges.data.i32[1]
+        supportedPreviewFpsRanges[0].low, supportedPreviewFpsRanges[0].high
     };
     int32_t curRange =
             bestStillCaptureFpsRange[1] - bestStillCaptureFpsRange[0];
-    for (size_t i = 2; i < availableFpsRanges.count; i += 2) {
+    for (size_t i = 1; i < supportedPreviewFpsRanges.size(); i ++) {
         int32_t nextRange =
-                availableFpsRanges.data.i32[i + 1] -
-                availableFpsRanges.data.i32[i];
+                supportedPreviewFpsRanges[i].high -
+                supportedPreviewFpsRanges[i].low;
         if ( (nextRange > curRange) ||       // Maximize size of FPS range first
                 (nextRange == curRange &&    // Then minimize low-end FPS
-                 bestStillCaptureFpsRange[0] > availableFpsRanges.data.i32[i])) {
+                 bestStillCaptureFpsRange[0] > supportedPreviewFpsRanges[i].low)) {
 
-            bestStillCaptureFpsRange[0] = availableFpsRanges.data.i32[i];
-            bestStillCaptureFpsRange[1] = availableFpsRanges.data.i32[i + 1];
+            bestStillCaptureFpsRange[0] = supportedPreviewFpsRanges[i].low;
+            bestStillCaptureFpsRange[1] = supportedPreviewFpsRanges[i].high;
             curRange = nextRange;
         }
     }
@@ -1011,7 +1066,7 @@ status_t Parameters::buildFastInfo() {
             ALOGE("%s: Camera %d: Scene mode override list is an "
                     "unexpected size: %zu (expected %zu)", __FUNCTION__,
                     cameraId, sceneModeOverrides.count,
-                    availableSceneModes.count);
+                    availableSceneModes.count * kModesPerSceneMode);
             return NO_INIT;
         }
         for (size_t i = 0; i < availableSceneModes.count; i++) {
@@ -1097,6 +1152,8 @@ status_t Parameters::buildFastInfo() {
     }
     ALOGV("Camera %d: Flexible YUV %s supported",
             cameraId, fastInfo.useFlexibleYuv ? "is" : "is not");
+
+    fastInfo.maxJpegSize = getMaxSize(getAvailableJpegSizes());
 
     return OK;
 }
@@ -1835,10 +1892,6 @@ status_t Parameters::set(const String8& paramString) {
         ALOGE("%s: Video stabilization not supported", __FUNCTION__);
     }
 
-    // LIGHTFX
-    validatedParams.lightFx = lightFxStringToEnum(
-        newParams.get(CameraParameters::KEY_LIGHTFX));
-
     /** Update internal parameters */
 
     *this = validatedParams;
@@ -1930,7 +1983,7 @@ status_t Parameters::updateRequest(CameraMetadata *request) const {
     if (res != OK) return res;
 
     // android.hardware.Camera requires that when face detect is enabled, the
-    // camera is in a face-priority mode. HAL2 splits this into separate parts
+    // camera is in a face-priority mode. HAL3.x splits this into separate parts
     // (face detection statistics and face priority scene mode). Map from other
     // to the other.
     bool sceneModeActive =
@@ -2086,12 +2139,7 @@ status_t Parameters::updateRequest(CameraMetadata *request) const {
 
     delete[] reqMeteringAreas;
 
-    /* don't include jpeg thumbnail size - it's valid for
-       it to be set to (0,0), meaning 'no thumbnail' */
-    CropRegion crop = calculateCropRegion( (CropRegion::Outputs)(
-            CropRegion::OUTPUT_PREVIEW     |
-            CropRegion::OUTPUT_VIDEO       |
-            CropRegion::OUTPUT_PICTURE    ));
+    CropRegion crop = calculateCropRegion(/*previewOnly*/ false);
     int32_t reqCropRegion[4] = {
         static_cast<int32_t>(crop.left),
         static_cast<int32_t>(crop.top),
@@ -2211,6 +2259,25 @@ bool Parameters::isJpegSizeOverridden() {
     return pictureSizeOverriden;
 }
 
+bool Parameters::useZeroShutterLag() const {
+    // If ZSL mode is disabled, don't use it
+    if (!allowZslMode) return false;
+    // If recording hint is enabled, don't do ZSL
+    if (recordingHint) return false;
+    // If still capture size is no bigger than preview or video size,
+    // don't do ZSL
+    if (pictureWidth <= previewWidth || pictureHeight <= previewHeight ||
+            pictureWidth <= videoWidth || pictureHeight <= videoHeight) {
+        return false;
+    }
+    // If still capture size is less than quarter of max, don't do ZSL
+    if ((pictureWidth * pictureHeight) <
+            (fastInfo.maxJpegSize.width * fastInfo.maxJpegSize.height / 4) ) {
+        return false;
+    }
+    return true;
+}
+
 const char* Parameters::getStateName(State state) {
 #define CASE_ENUM_TO_CHAR(x) case x: return(#x); break;
     switch(state) {
@@ -2253,7 +2320,7 @@ const char* Parameters::formatEnumToString(int format) {
         case HAL_PIXEL_FORMAT_RGBA_8888:   // RGBA8888
             fmt = CameraParameters::PIXEL_FORMAT_RGBA8888;
             break;
-        case HAL_PIXEL_FORMAT_RAW_SENSOR:
+        case HAL_PIXEL_FORMAT_RAW16:
             ALOGW("Raw sensor preview format requested.");
             fmt = CameraParameters::PIXEL_FORMAT_BAYER_RGGB;
             break;
@@ -2477,18 +2544,6 @@ const char *Parameters::focusModeEnumToString(focusMode_t focusMode) {
     }
 }
 
-Parameters::Parameters::lightFxMode_t Parameters::lightFxStringToEnum(
-        const char *lightFxMode) {
-    return
-        !lightFxMode ?
-            Parameters::LIGHTFX_NONE :
-        !strcmp(lightFxMode, CameraParameters::LIGHTFX_LOWLIGHT) ?
-            Parameters::LIGHTFX_LOWLIGHT :
-        !strcmp(lightFxMode, CameraParameters::LIGHTFX_HDR) ?
-            Parameters::LIGHTFX_HDR :
-        Parameters::LIGHTFX_NONE;
-}
-
 status_t Parameters::parseAreas(const char *areasCStr,
         Vector<Parameters::Area> *areas) {
     static const size_t NUM_FIELDS = 5;
@@ -2589,7 +2644,7 @@ int Parameters::cropXToArray(int x) const {
     ALOG_ASSERT(x >= 0, "Crop-relative X coordinate = '%d' is out of bounds"
                          "(lower = 0)", x);
 
-    CropRegion previewCrop = calculateCropRegion(CropRegion::OUTPUT_PREVIEW);
+    CropRegion previewCrop = calculateCropRegion(/*previewOnly*/ true);
     ALOG_ASSERT(x < previewCrop.width, "Crop-relative X coordinate = '%d' "
                     "is out of bounds (upper = %f)", x, previewCrop.width);
 
@@ -2605,7 +2660,7 @@ int Parameters::cropYToArray(int y) const {
     ALOG_ASSERT(y >= 0, "Crop-relative Y coordinate = '%d' is out of bounds "
         "(lower = 0)", y);
 
-    CropRegion previewCrop = calculateCropRegion(CropRegion::OUTPUT_PREVIEW);
+    CropRegion previewCrop = calculateCropRegion(/*previewOnly*/ true);
     ALOG_ASSERT(y < previewCrop.height, "Crop-relative Y coordinate = '%d' is "
                 "out of bounds (upper = %f)", y, previewCrop.height);
 
@@ -2620,12 +2675,12 @@ int Parameters::cropYToArray(int y) const {
 }
 
 int Parameters::normalizedXToCrop(int x) const {
-    CropRegion previewCrop = calculateCropRegion(CropRegion::OUTPUT_PREVIEW);
+    CropRegion previewCrop = calculateCropRegion(/*previewOnly*/ true);
     return (x + 1000) * (previewCrop.width - 1) / 2000;
 }
 
 int Parameters::normalizedYToCrop(int y) const {
-    CropRegion previewCrop = calculateCropRegion(CropRegion::OUTPUT_PREVIEW);
+    CropRegion previewCrop = calculateCropRegion(/*previewOnly*/ true);
     return (y + 1000) * (previewCrop.height - 1) / 2000;
 }
 
@@ -2769,6 +2824,17 @@ Parameters::Size Parameters::getMaxSizeForRatio(
     return maxSize;
 }
 
+Parameters::Size Parameters::getMaxSize(const Vector<Parameters::Size> &sizes) {
+    Size maxSize = {-1, -1};
+    for (size_t i = 0; i < sizes.size(); i++) {
+        if (sizes[i].width > maxSize.width ||
+                (sizes[i].width == maxSize.width && sizes[i].height > maxSize.height )) {
+            maxSize = sizes[i];
+        }
+    }
+    return maxSize;
+}
+
 Vector<Parameters::StreamConfiguration> Parameters::getStreamConfigurations() {
     const int STREAM_CONFIGURATION_SIZE = 4;
     const int STREAM_FORMAT_OFFSET = 0;
@@ -2783,7 +2849,7 @@ Vector<Parameters::StreamConfiguration> Parameters::getStreamConfigurations() {
 
     camera_metadata_ro_entry_t availableStreamConfigs =
                 staticInfo(ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS);
-    for (size_t i=0; i < availableStreamConfigs.count; i+= STREAM_CONFIGURATION_SIZE) {
+    for (size_t i = 0; i < availableStreamConfigs.count; i+= STREAM_CONFIGURATION_SIZE) {
         int32_t format = availableStreamConfigs.data.i32[i + STREAM_FORMAT_OFFSET];
         int32_t width = availableStreamConfigs.data.i32[i + STREAM_WIDTH_OFFSET];
         int32_t height = availableStreamConfigs.data.i32[i + STREAM_HEIGHT_OFFSET];
@@ -2794,11 +2860,88 @@ Vector<Parameters::StreamConfiguration> Parameters::getStreamConfigurations() {
     return scs;
 }
 
+int64_t Parameters::getJpegStreamMinFrameDurationNs(Parameters::Size size) {
+    if (mDeviceVersion >= CAMERA_DEVICE_API_VERSION_3_2) {
+        return getMinFrameDurationNs(size, HAL_PIXEL_FORMAT_BLOB);
+    } else {
+        Vector<Size> availableJpegSizes = getAvailableJpegSizes();
+        size_t streamIdx = availableJpegSizes.size();
+        for (size_t i = 0; i < availableJpegSizes.size(); i++) {
+            if (availableJpegSizes[i].width == size.width &&
+                    availableJpegSizes[i].height == size.height) {
+                streamIdx = i;
+                break;
+            }
+        }
+        if (streamIdx != availableJpegSizes.size()) {
+            camera_metadata_ro_entry_t jpegMinDurations =
+                    staticInfo(ANDROID_SCALER_AVAILABLE_JPEG_MIN_DURATIONS);
+            if (streamIdx < jpegMinDurations.count) {
+                return jpegMinDurations.data.i64[streamIdx];
+            }
+        }
+    }
+    ALOGE("%s: cannot find min frame duration for jpeg size %dx%d",
+            __FUNCTION__, size.width, size.height);
+    return -1;
+}
+
+int64_t Parameters::getMinFrameDurationNs(Parameters::Size size, int fmt) {
+    if (mDeviceVersion < CAMERA_DEVICE_API_VERSION_3_2) {
+        ALOGE("Min frame duration for HAL 3.1 or lower is not supported");
+        return -1;
+    }
+
+    const int STREAM_DURATION_SIZE = 4;
+    const int STREAM_FORMAT_OFFSET = 0;
+    const int STREAM_WIDTH_OFFSET = 1;
+    const int STREAM_HEIGHT_OFFSET = 2;
+    const int STREAM_DURATION_OFFSET = 3;
+    camera_metadata_ro_entry_t availableStreamMinDurations =
+                staticInfo(ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS);
+    for (size_t i = 0; i < availableStreamMinDurations.count; i+= STREAM_DURATION_SIZE) {
+        int64_t format = availableStreamMinDurations.data.i64[i + STREAM_FORMAT_OFFSET];
+        int64_t width = availableStreamMinDurations.data.i64[i + STREAM_WIDTH_OFFSET];
+        int64_t height = availableStreamMinDurations.data.i64[i + STREAM_HEIGHT_OFFSET];
+        int64_t duration = availableStreamMinDurations.data.i64[i + STREAM_DURATION_OFFSET];
+        if (format == fmt && width == size.width && height == size.height) {
+            return duration;
+        }
+    }
+
+    return -1;
+}
+
+bool Parameters::isFpsSupported(const Vector<Size> &sizes, int format, int32_t fps) {
+    // Skip the check for older HAL version, as the min duration is not supported.
+    if (mDeviceVersion < CAMERA_DEVICE_API_VERSION_3_2) {
+        return true;
+    }
+
+    // Get min frame duration for each size and check if the given fps range can be supported.
+    const int32_t FPS_MARGIN = 1;
+    for (size_t i = 0 ; i < sizes.size(); i++) {
+        int64_t minFrameDuration = getMinFrameDurationNs(sizes[i], format);
+        if (minFrameDuration <= 0) {
+            ALOGE("Min frame duration (%" PRId64") for size (%dx%d) and format 0x%x is wrong!",
+                minFrameDuration, sizes[i].width, sizes[i].height, format);
+            return false;
+        }
+        int32_t maxSupportedFps = 1e9 / minFrameDuration;
+        // Add some margin here for the case where the hal supports 29.xxxfps.
+        maxSupportedFps += FPS_MARGIN;
+        if (fps > maxSupportedFps) {
+            return false;
+        }
+    }
+    return true;
+}
+
 SortedVector<int32_t> Parameters::getAvailableOutputFormats() {
     SortedVector<int32_t> outputFormats; // Non-duplicated output formats
     if (mDeviceVersion >= CAMERA_DEVICE_API_VERSION_3_2) {
         Vector<StreamConfiguration> scs = getStreamConfigurations();
-        for (size_t i=0; i < scs.size(); i++) {
+        for (size_t i = 0; i < scs.size(); i++) {
             const StreamConfiguration &sc = scs[i];
             if (sc.isInput == ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT) {
                 outputFormats.add(sc.format);
@@ -2806,7 +2949,7 @@ SortedVector<int32_t> Parameters::getAvailableOutputFormats() {
         }
     } else {
         camera_metadata_ro_entry_t availableFormats = staticInfo(ANDROID_SCALER_AVAILABLE_FORMATS);
-        for (size_t i=0; i < availableFormats.count; i++) {
+        for (size_t i = 0; i < availableFormats.count; i++) {
             outputFormats.add(availableFormats.data.i32[i]);
         }
     }
@@ -2817,7 +2960,7 @@ Vector<Parameters::Size> Parameters::getAvailableJpegSizes() {
     Vector<Parameters::Size> jpegSizes;
     if (mDeviceVersion >= CAMERA_DEVICE_API_VERSION_3_2) {
         Vector<StreamConfiguration> scs = getStreamConfigurations();
-        for (size_t i=0; i < scs.size(); i++) {
+        for (size_t i = 0; i < scs.size(); i++) {
             const StreamConfiguration &sc = scs[i];
             if (sc.isInput == ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT &&
                     sc.format == HAL_PIXEL_FORMAT_BLOB) {
@@ -2831,7 +2974,7 @@ Vector<Parameters::Size> Parameters::getAvailableJpegSizes() {
         const int HEIGHT_OFFSET = 1;
         camera_metadata_ro_entry_t availableJpegSizes =
             staticInfo(ANDROID_SCALER_AVAILABLE_JPEG_SIZES);
-        for (size_t i=0; i < availableJpegSizes.count; i+= JPEG_SIZE_ENTRY_COUNT) {
+        for (size_t i = 0; i < availableJpegSizes.count; i+= JPEG_SIZE_ENTRY_COUNT) {
             int width = availableJpegSizes.data.i32[i + WIDTH_OFFSET];
             int height = availableJpegSizes.data.i32[i + HEIGHT_OFFSET];
             Size sz = {width, height};
@@ -2841,8 +2984,7 @@ Vector<Parameters::Size> Parameters::getAvailableJpegSizes() {
     return jpegSizes;
 }
 
-Parameters::CropRegion Parameters::calculateCropRegion(
-                            Parameters::CropRegion::Outputs outputs) const {
+Parameters::CropRegion Parameters::calculateCropRegion(bool previewOnly) const {
 
     float zoomLeft, zoomTop, zoomWidth, zoomHeight;
 
@@ -2866,89 +3008,44 @@ Parameters::CropRegion Parameters::calculateCropRegion(
           maxDigitalZoom.data.f[0], zoomIncrement, zoomRatio, previewWidth,
           previewHeight, fastInfo.arrayWidth, fastInfo.arrayHeight);
 
-    /*
-     * Assumption: On the HAL side each stream buffer calculates its crop
-     * rectangle as follows:
-     *   cropRect = (zoomLeft, zoomRight,
-     *               zoomWidth, zoomHeight * zoomWidth / outputWidth);
-     *
-     * Note that if zoomWidth > bufferWidth, the new cropHeight > zoomHeight
-     *      (we can then get into trouble if the cropHeight > arrayHeight).
-     * By selecting the zoomRatio based on the smallest outputRatio, we
-     * guarantee this will never happen.
-     */
+    if (previewOnly) {
+        // Calculate a tight crop region for the preview stream only
+        float previewRatio = static_cast<float>(previewWidth) / previewHeight;
 
-    // Enumerate all possible output sizes, select the one with the smallest
-    // aspect ratio
-    float minOutputWidth, minOutputHeight, minOutputRatio;
-    {
-        float outputSizes[][2] = {
-            { static_cast<float>(previewWidth),
-              static_cast<float>(previewHeight) },
-            { static_cast<float>(videoWidth),
-              static_cast<float>(videoHeight) },
-            { static_cast<float>(jpegThumbSize[0]),
-              static_cast<float>(jpegThumbSize[1]) },
-            { static_cast<float>(pictureWidth),
-              static_cast<float>(pictureHeight) },
-        };
+        /* Ensure that the width/height never go out of bounds
+         * by scaling across a diffent dimension if an out-of-bounds
+         * possibility exists.
+         *
+         * e.g. if the previewratio < arrayratio and e.g. zoomratio = 1.0, then by
+         * calculating the zoomWidth from zoomHeight we'll actually get a
+         * zoomheight > arrayheight
+         */
+        float arrayRatio = 1.f * fastInfo.arrayWidth / fastInfo.arrayHeight;
+        if (previewRatio >= arrayRatio) {
+            // Adjust the height based on the width
+            zoomWidth =  fastInfo.arrayWidth / zoomRatio;
+            zoomHeight = zoomWidth *
+                    previewHeight / previewWidth;
 
-        minOutputWidth = outputSizes[0][0];
-        minOutputHeight = outputSizes[0][1];
-        minOutputRatio = minOutputWidth / minOutputHeight;
-        for (unsigned int i = 0;
-             i < sizeof(outputSizes) / sizeof(outputSizes[0]);
-             ++i) {
-
-            // skip over outputs we don't want to consider for the crop region
-            if ( !((1 << i) & outputs) ) {
-                continue;
-            }
-
-            float outputWidth = outputSizes[i][0];
-            float outputHeight = outputSizes[i][1];
-            float outputRatio = outputWidth / outputHeight;
-
-            if (minOutputRatio > outputRatio) {
-                minOutputRatio = outputRatio;
-                minOutputWidth = outputWidth;
-                minOutputHeight = outputHeight;
-            }
-
-            // and then use this output ratio instead of preview output ratio
-            ALOGV("Enumerating output ratio %f = %f / %f, min is %f",
-                  outputRatio, outputWidth, outputHeight, minOutputRatio);
+        } else {
+            // Adjust the width based on the height
+            zoomHeight = fastInfo.arrayHeight / zoomRatio;
+            zoomWidth = zoomHeight *
+                    previewWidth / previewHeight;
         }
-    }
-
-    /* Ensure that the width/height never go out of bounds
-     * by scaling across a diffent dimension if an out-of-bounds
-     * possibility exists.
-     *
-     * e.g. if the previewratio < arrayratio and e.g. zoomratio = 1.0, then by
-     * calculating the zoomWidth from zoomHeight we'll actually get a
-     * zoomheight > arrayheight
-     */
-    float arrayRatio = 1.f * fastInfo.arrayWidth / fastInfo.arrayHeight;
-    if (minOutputRatio >= arrayRatio) {
-        // Adjust the height based on the width
-        zoomWidth =  fastInfo.arrayWidth / zoomRatio;
-        zoomHeight = zoomWidth *
-                minOutputHeight / minOutputWidth;
-
     } else {
-        // Adjust the width based on the height
+        // Calculate the global crop region with a shape matching the active
+        // array.
+        zoomWidth = fastInfo.arrayWidth / zoomRatio;
         zoomHeight = fastInfo.arrayHeight / zoomRatio;
-        zoomWidth = zoomHeight *
-                minOutputWidth / minOutputHeight;
     }
-    // centering the zoom area within the active area
+
+    // center the zoom area within the active area
     zoomLeft = (fastInfo.arrayWidth - zoomWidth) / 2;
     zoomTop = (fastInfo.arrayHeight - zoomHeight) / 2;
 
     ALOGV("Crop region calculated (x=%d,y=%d,w=%f,h=%f) for zoom=%d",
         (int32_t)zoomLeft, (int32_t)zoomTop, zoomWidth, zoomHeight, this->zoom);
-
 
     CropRegion crop = { zoomLeft, zoomTop, zoomWidth, zoomHeight };
     return crop;

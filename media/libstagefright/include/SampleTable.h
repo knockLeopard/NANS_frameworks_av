@@ -95,6 +95,9 @@ private:
     static const uint32_t kSampleSizeType32;
     static const uint32_t kSampleSizeTypeCompact;
 
+    // Limit the total size of all internal tables to 200MiB.
+    static const size_t kMaxTotalSize = 200 * (1 << 20);
+
     sp<DataSource> mDataSource;
     Mutex mLock;
 
@@ -110,8 +113,9 @@ private:
     uint32_t mDefaultSampleSize;
     uint32_t mNumSampleSizes;
 
+    bool mHasTimeToSample;
     uint32_t mTimeToSampleCount;
-    uint32_t *mTimeToSample;
+    uint32_t* mTimeToSample;
 
     struct SampleTimeEntry {
         uint32_t mSampleIndex;
@@ -119,7 +123,7 @@ private:
     };
     SampleTimeEntry *mSampleTimeEntries;
 
-    uint32_t *mCompositionTimeDeltaEntries;
+    int32_t *mCompositionTimeDeltaEntries;
     size_t mNumCompositionTimeDeltaEntries;
     CompositionDeltaLookup *mCompositionDeltaLookup;
 
@@ -137,17 +141,21 @@ private:
     };
     SampleToChunkEntry *mSampleToChunkEntries;
 
+    // Approximate size of all tables combined.
+    uint64_t mTotalSize;
+
     friend struct SampleIterator;
 
     // normally we don't round
     inline uint64_t getSampleTime(
             size_t sample_index, uint64_t scale_num, uint64_t scale_den) const {
-        return (mSampleTimeEntries[sample_index].mCompositionTime
-            * scale_num) / scale_den;
+        return (sample_index < (size_t)mNumSampleSizes && mSampleTimeEntries != NULL
+                && scale_den != 0)
+                ? (mSampleTimeEntries[sample_index].mCompositionTime * scale_num) / scale_den : 0;
     }
 
     status_t getSampleSize_l(uint32_t sample_index, size_t *sample_size);
-    uint32_t getCompositionTimeOffset(uint32_t sampleIndex);
+    int32_t getCompositionTimeOffset(uint32_t sampleIndex);
 
     static int CompareIncreasingTime(const void *, const void *);
 

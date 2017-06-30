@@ -1,6 +1,6 @@
 # Copyright 2005 The Android Open Source Project
 #
-# Android.mk for resampler_tools 
+# Android.mk for resampler_tools
 #
 
 
@@ -12,6 +12,6 @@ LOCAL_SRC_FILES := \
 
 LOCAL_MODULE := fir
 
+LOCAL_CFLAGS := -Werror -Wall
+
 include $(BUILD_HOST_EXECUTABLE)
-
-

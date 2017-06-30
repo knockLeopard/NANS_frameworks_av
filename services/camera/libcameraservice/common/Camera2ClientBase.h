@@ -18,6 +18,7 @@
 #define ANDROID_SERVERS_CAMERA_CAMERA2CLIENT_BASE_H
 
 #include "common/CameraDeviceBase.h"
+#include "common/CameraModule.h"
 #include "camera/CaptureResult.h"
 
 namespace android {
@@ -35,10 +36,10 @@ public:
     typedef typename TClientBase::TCamCallbacks TCamCallbacks;
 
     /**
-     * Base binder interface (see ICamera/IProCameraUser for details)
+     * Base binder interface (see ICamera/ICameraDeviceUser for details)
      */
-    virtual status_t      connect(const sp<TCamCallbacks>& callbacks);
-    virtual void          disconnect();
+    virtual status_t       connect(const sp<TCamCallbacks>& callbacks);
+    virtual binder::Status disconnect();
 
     /**
      * Interface used by CameraService
@@ -55,14 +56,14 @@ public:
                       int servicePid);
     virtual ~Camera2ClientBase();
 
-    virtual status_t      initialize(camera_module_t *module);
-    virtual status_t      dump(int fd, const Vector<String16>& args);
+    virtual status_t      initialize(CameraModule *module);
+    virtual status_t      dumpClient(int fd, const Vector<String16>& args);
 
     /**
      * CameraDeviceBase::NotificationListener implementation
      */
 
-    virtual void          notifyError(ICameraDeviceCallbacks::CameraErrorCode errorCode,
+    virtual void          notifyError(int32_t errorCode,
                                       const CaptureResultExtras& resultExtras);
     virtual void          notifyIdle();
     virtual void          notifyShutter(const CaptureResultExtras& resultExtras,
@@ -71,7 +72,8 @@ public:
     virtual void          notifyAutoExposure(uint8_t newState, int triggerId);
     virtual void          notifyAutoWhitebalance(uint8_t newState,
                                                  int triggerId);
-
+    virtual void          notifyPrepared(int streamId);
+    virtual void          notifyRepeatingRequestError(long lastFrameNumber);
 
     int                   getCameraId() const;
     const sp<CameraDeviceBase>&
@@ -111,7 +113,7 @@ protected:
     pid_t mInitialClientPid;
 
     virtual sp<IBinder> asBinderWrapper() {
-        return IInterface::asBinder();
+        return IInterface::asBinder(this);
     }
 
     virtual status_t      dumpDevice(int fd, const Vector<String16>& args);
@@ -124,7 +126,7 @@ protected:
     // that mBinderSerializationLock is locked when they're called
     mutable Mutex         mBinderSerializationLock;
 
-    /** CameraDeviceBase instance wrapping HAL2+ entry */
+    /** CameraDeviceBase instance wrapping HAL3+ entry */
 
     const int mDeviceVersion;
     sp<CameraDeviceBase>  mDevice;
@@ -135,6 +137,8 @@ protected:
     status_t              checkPid(const char *checkLocation) const;
 
     virtual void          detachDevice();
+
+    bool                  mDeviceActive;
 };
 
 }; // namespace android

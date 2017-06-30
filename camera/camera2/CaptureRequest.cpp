@@ -25,8 +25,10 @@
 #include <gui/Surface.h>
 
 namespace android {
+namespace hardware {
+namespace camera2 {
 
-status_t CaptureRequest::readFromParcel(Parcel* parcel) {
+status_t CaptureRequest::readFromParcel(const Parcel* parcel) {
     if (parcel == NULL) {
         ALOGE("%s: Null parcel", __FUNCTION__);
         return BAD_VALUE;
@@ -35,7 +37,7 @@ status_t CaptureRequest::readFromParcel(Parcel* parcel) {
     mMetadata.clear();
     mSurfaceList.clear();
 
-    status_t err;
+    status_t err = OK;
 
     if ((err = mMetadata.readFromParcel(parcel)) != OK) {
         ALOGE("%s: Failed to read metadata from parcel", __FUNCTION__);
@@ -63,23 +65,27 @@ status_t CaptureRequest::readFromParcel(Parcel* parcel) {
         }
 
         // Surface.writeToParcel
-        const char16_t* name = parcel->readString16Inplace(&len);
-        ALOGV("%s: Read surface name = %s", __FUNCTION__,
-            name != NULL ? String8(name).string() : "<null>");
-        sp<IBinder> binder(parcel->readStrongBinder());
-        ALOGV("%s: Read surface binder = %p",
-              __FUNCTION__, binder.get());
+        view::Surface surfaceShim;
+        if ((err = surfaceShim.readFromParcel(parcel)) != OK) {
+            ALOGE("%s: Failed to read output target Surface %d from parcel: %s (%d)",
+                    __FUNCTION__, i, strerror(-err), err);
+            return err;
+        }
 
         sp<Surface> surface;
-
-        if (binder != NULL) {
-            sp<IGraphicBufferProducer> gbp =
-                    interface_cast<IGraphicBufferProducer>(binder);
-            surface = new Surface(gbp);
+        if (surfaceShim.graphicBufferProducer != NULL) {
+            surface = new Surface(surfaceShim.graphicBufferProducer);
         }
 
         mSurfaceList.push_back(surface);
     }
+
+    int isReprocess = 0;
+    if ((err = parcel->readInt32(&isReprocess)) != OK) {
+        ALOGE("%s: Failed to read reprocessing from parcel", __FUNCTION__);
+        return err;
+    }
+    mIsReprocess = (isReprocess != 0);
 
     return OK;
 }
@@ -90,7 +96,7 @@ status_t CaptureRequest::writeToParcel(Parcel* parcel) const {
         return BAD_VALUE;
     }
 
-    status_t err;
+    status_t err = OK;
 
     if ((err = mMetadata.writeToParcel(parcel)) != OK) {
         return err;
@@ -102,23 +108,25 @@ status_t CaptureRequest::writeToParcel(Parcel* parcel) const {
     parcel->writeInt32(size);
 
     for (int32_t i = 0; i < size; ++i) {
-        sp<Surface> surface = mSurfaceList[i];
-
-        sp<IBinder> binder;
-        if (surface != 0) {
-            binder = surface->getIGraphicBufferProducer()->asBinder();
-        }
-
         // not sure if readParcelableArray does this, hard to tell from source
         parcel->writeString16(String16("android.view.Surface"));
 
         // Surface.writeToParcel
-        parcel->writeString16(String16("unknown_name"));
-        // Surface.nativeWriteToParcel
-        parcel->writeStrongBinder(binder);
+        view::Surface surfaceShim;
+        surfaceShim.name = String16("unknown_name");
+        surfaceShim.graphicBufferProducer = mSurfaceList[i]->getIGraphicBufferProducer();
+        if ((err = surfaceShim.writeToParcel(parcel)) != OK) {
+            ALOGE("%s: Failed to write output target Surface %d to parcel: %s (%d)",
+                    __FUNCTION__, i, strerror(-err), err);
+            return err;
+        }
     }
+
+    parcel->writeInt32(mIsReprocess ? 1 : 0);
 
     return OK;
 }
 
-}; // namespace android
+} // namespace camera2
+} // namespace hardware
+} // namespace android

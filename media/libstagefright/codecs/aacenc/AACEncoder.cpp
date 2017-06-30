@@ -30,7 +30,7 @@
 
 namespace android {
 
-AACEncoder::AACEncoder(const sp<MediaSource> &source, const sp<MetaData> &meta)
+AACEncoder::AACEncoder(const sp<IMediaSource> &source, const sp<MetaData> &meta)
     : mSource(source),
       mMeta(meta),
       mStarted(false),
@@ -214,8 +214,6 @@ sp<MetaData> AACEncoder::getFormat() {
 
 status_t AACEncoder::read(
         MediaBuffer **out, const ReadOptions *options) {
-    status_t err;
-
     *out = NULL;
 
     int64_t seekTimeUs;

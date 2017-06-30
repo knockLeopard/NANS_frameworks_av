@@ -29,10 +29,14 @@ namespace android {
 
 class Surface;
 class IMediaRecorder;
-class ICamera;
 class ICameraRecordingProxy;
 class IGraphicBufferProducer;
+struct PersistentSurface;
 class Surface;
+
+namespace hardware {
+class ICamera;
+}
 
 typedef void (*media_completion_f)(status_t status, void *cookie);
 
@@ -94,6 +98,7 @@ enum video_encoder {
     VIDEO_ENCODER_H264 = 2,
     VIDEO_ENCODER_MPEG_4_SP = 3,
     VIDEO_ENCODER_VP8 = 4,
+    VIDEO_ENCODER_HEVC = 5,
 
     VIDEO_ENCODER_LIST_END // must be the last - used to validate the video encoder type
 };
@@ -209,19 +214,19 @@ class MediaRecorder : public BnMediaRecorderClient,
                       public virtual IMediaDeathNotifier
 {
 public:
-    MediaRecorder();
+    MediaRecorder(const String16& opPackageName);
     ~MediaRecorder();
 
     void        died();
     status_t    initCheck();
-    status_t    setCamera(const sp<ICamera>& camera, const sp<ICameraRecordingProxy>& proxy);
+    status_t    setCamera(const sp<hardware::ICamera>& camera,
+            const sp<ICameraRecordingProxy>& proxy);
     status_t    setPreviewSurface(const sp<IGraphicBufferProducer>& surface);
     status_t    setVideoSource(int vs);
     status_t    setAudioSource(int as);
     status_t    setOutputFormat(int of);
     status_t    setVideoEncoder(int ve);
     status_t    setAudioEncoder(int ae);
-    status_t    setOutputFile(const char* path);
     status_t    setOutputFile(int fd, int64_t offset, int64_t length);
     status_t    setVideoSize(int width, int height);
     status_t    setVideoFrameRate(int frames_per_second);
@@ -233,10 +238,13 @@ public:
     status_t    start();
     status_t    stop();
     status_t    reset();
+    status_t    pause();
+    status_t    resume();
     status_t    init();
     status_t    close();
     status_t    release();
     void        notify(int msg, int ext1, int ext2);
+    status_t    setInputSurface(const sp<PersistentSurface>& surface);
     sp<IGraphicBufferProducer>     querySurfaceMediaSourceFromMediaServer();
 
 private:

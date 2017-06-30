@@ -35,8 +35,12 @@ struct AudioSource : public MediaSource, public MediaBufferObserver {
     // _not_ a bitmask of audio_channels_t constants.
     AudioSource(
             audio_source_t inputSource,
+            const String16 &opPackageName,
             uint32_t sampleRate,
-            uint32_t channels = 1);
+            uint32_t channels,
+            uint32_t outSampleRate = 0,
+            uid_t uid = -1,
+            pid_t pid = -1);
 
     status_t initCheck() const;
 
@@ -77,6 +81,7 @@ private:
     status_t mInitCheck;
     bool mStarted;
     int32_t mSampleRate;
+    int32_t mOutSampleRate;
 
     bool mTrackMaxAmplitude;
     int64_t mStartTimeUs;

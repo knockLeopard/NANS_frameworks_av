@@ -272,9 +272,7 @@ int main(int argc, char* argv[]) {
             mFrameSize(frameSize),
             mNextFrame(0), mUnrel(0), mPvalues(Pvalues), mNextPidx(0) {
         }
-        virtual status_t getNextBuffer(Buffer* buffer,
-                int64_t pts = kInvalidPTS) {
-            (void)pts; // suppress warning
+        virtual status_t getNextBuffer(Buffer* buffer) {
             size_t requestedFrames = buffer->frameCount;
             if (requestedFrames > mNumFrames - mNextFrame) {
                 buffer->frameCount = mNumFrames - mNextFrame;
@@ -427,6 +425,14 @@ int main(int argc, char* argv[]) {
         printf("quality: %d  channels: %d  msec: %" PRId64 "  Mfrms/s: %.2lf\n",
                 quality, channels, time/1000000, output_frames * looplimit / (time / 1e9) / 1e6);
         resampler->reset();
+
+        // TODO fix legacy bug: reset does not clear buffers.
+        // delete and recreate resampler here.
+        delete resampler;
+        resampler = AudioResampler::create(format, channels,
+                    output_freq, quality);
+        resampler->setSampleRate(input_freq);
+        resampler->setVolume(AudioResampler::UNITY_GAIN_FLOAT, AudioResampler::UNITY_GAIN_FLOAT);
     }
 
     memset(output_vaddr, 0, output_size);

@@ -15,6 +15,7 @@
 ** limitations under the License.
 */
 
+//#define LOG_NDEBUG 0
 #define LOG_TAG "MediaPlayerFactory"
 #include <utils/Log.h>
 
@@ -29,9 +30,7 @@
 
 #include "MediaPlayerFactory.h"
 
-#include "MidiFile.h"
 #include "TestPlayerStub.h"
-#include "StagefrightPlayer.h"
 #include "nuplayer/NuPlayerDriver.h"
 
 namespace android {
@@ -64,18 +63,6 @@ status_t MediaPlayerFactory::registerFactory_l(IFactory* factory,
 }
 
 static player_type getDefaultPlayerType() {
-    char value[PROPERTY_VALUE_MAX];
-    if (property_get("media.stagefright.use-awesome", value, NULL)
-            && (!strcmp("1", value) || !strcasecmp("true", value))) {
-        return STAGEFRIGHT_PLAYER;
-    }
-
-    // TODO: remove this EXPERIMENTAL developer settings property
-    if (property_get("persist.sys.media.use-awesome", value, NULL)
-            && !strcasecmp("true", value)) {
-        return STAGEFRIGHT_PLAYER;
-    }
-
     return NU_PLAYER;
 }
 
@@ -131,12 +118,18 @@ player_type MediaPlayerFactory::getPlayerType(const sp<IMediaPlayer>& client,
     GET_PLAYER_TYPE_IMPL(client, source);
 }
 
+player_type MediaPlayerFactory::getPlayerType(const sp<IMediaPlayer>& client,
+                                              const sp<DataSource> &source) {
+    GET_PLAYER_TYPE_IMPL(client, source);
+}
+
 #undef GET_PLAYER_TYPE_IMPL
 
 sp<MediaPlayerBase> MediaPlayerFactory::createPlayer(
         player_type playerType,
         void* cookie,
-        notify_callback_f notifyFunc) {
+        notify_callback_f notifyFunc,
+        pid_t pid) {
     sp<MediaPlayerBase> p;
     IFactory* factory;
     status_t init_result;
@@ -150,7 +143,7 @@ sp<MediaPlayerBase> MediaPlayerFactory::createPlayer(
 
     factory = sFactoryMap.valueFor(playerType);
     CHECK(NULL != factory);
-    p = factory->createPlayer();
+    p = factory->createPlayer(pid);
 
     if (p == NULL) {
         ALOGE("Failed to create player object of type %d, create failed",
@@ -175,63 +168,6 @@ sp<MediaPlayerBase> MediaPlayerFactory::createPlayer(
  *                     Built-In Factory Implementations                      *
  *                                                                           *
  *****************************************************************************/
-
-class StagefrightPlayerFactory :
-    public MediaPlayerFactory::IFactory {
-  public:
-    virtual float scoreFactory(const sp<IMediaPlayer>& /*client*/,
-                               int fd,
-                               int64_t offset,
-                               int64_t length,
-                               float /*curScore*/) {
-        if (legacyDrm()) {
-            sp<DataSource> source = new FileSource(dup(fd), offset, length);
-            String8 mimeType;
-            float confidence;
-            if (SniffWVM(source, &mimeType, &confidence, NULL /* format */)) {
-                return 1.0;
-            }
-        }
-
-        if (getDefaultPlayerType() == STAGEFRIGHT_PLAYER) {
-            char buf[20];
-            lseek(fd, offset, SEEK_SET);
-            read(fd, buf, sizeof(buf));
-            lseek(fd, offset, SEEK_SET);
-
-            uint32_t ident = *((uint32_t*)buf);
-
-            // Ogg vorbis?
-            if (ident == 0x5367674f) // 'OggS'
-                return 1.0;
-        }
-
-        return 0.0;
-    }
-
-    virtual float scoreFactory(const sp<IMediaPlayer>& /*client*/,
-                               const char* url,
-                               float /*curScore*/) {
-        if (legacyDrm() && !strncasecmp("widevine://", url, 11)) {
-            return 1.0;
-        }
-        return 0.0;
-    }
-
-    virtual sp<MediaPlayerBase> createPlayer() {
-        ALOGV(" create StagefrightPlayer");
-        return new StagefrightPlayer();
-    }
-  private:
-    bool legacyDrm() {
-        char value[PROPERTY_VALUE_MAX];
-        if (property_get("persist.sys.media.legacy-drm", value, NULL)
-                && (!strcmp("1", value) || !strcasecmp("true", value))) {
-            return true;
-        }
-        return false;
-    }
-};
 
 class NuPlayerFactory : public MediaPlayerFactory::IFactory {
   public:
@@ -273,78 +209,16 @@ class NuPlayerFactory : public MediaPlayerFactory::IFactory {
         return 1.0;
     }
 
-    virtual sp<MediaPlayerBase> createPlayer() {
+    virtual float scoreFactory(const sp<IMediaPlayer>& /*client*/,
+                               const sp<DataSource>& /*source*/,
+                               float /*curScore*/) {
+        // Only NuPlayer supports setting a DataSource source directly.
+        return 1.0;
+    }
+
+    virtual sp<MediaPlayerBase> createPlayer(pid_t pid) {
         ALOGV(" create NuPlayer");
-        return new NuPlayerDriver;
-    }
-};
-
-class SonivoxPlayerFactory : public MediaPlayerFactory::IFactory {
-  public:
-    virtual float scoreFactory(const sp<IMediaPlayer>& /*client*/,
-                               const char* url,
-                               float curScore) {
-        static const float kOurScore = 0.4;
-        static const char* const FILE_EXTS[] = { ".mid",
-                                                 ".midi",
-                                                 ".smf",
-                                                 ".xmf",
-                                                 ".mxmf",
-                                                 ".imy",
-                                                 ".rtttl",
-                                                 ".rtx",
-                                                 ".ota" };
-        if (kOurScore <= curScore)
-            return 0.0;
-
-        // use MidiFile for MIDI extensions
-        int lenURL = strlen(url);
-        for (int i = 0; i < NELEM(FILE_EXTS); ++i) {
-            int len = strlen(FILE_EXTS[i]);
-            int start = lenURL - len;
-            if (start > 0) {
-                if (!strncasecmp(url + start, FILE_EXTS[i], len)) {
-                    return kOurScore;
-                }
-            }
-        }
-
-        return 0.0;
-    }
-
-    virtual float scoreFactory(const sp<IMediaPlayer>& /*client*/,
-                               int fd,
-                               int64_t offset,
-                               int64_t length,
-                               float curScore) {
-        static const float kOurScore = 0.8;
-
-        if (kOurScore <= curScore)
-            return 0.0;
-
-        // Some kind of MIDI?
-        EAS_DATA_HANDLE easdata;
-        if (EAS_Init(&easdata) == EAS_SUCCESS) {
-            EAS_FILE locator;
-            locator.path = NULL;
-            locator.fd = fd;
-            locator.offset = offset;
-            locator.length = length;
-            EAS_HANDLE  eashandle;
-            if (EAS_OpenFile(easdata, &locator, &eashandle) == EAS_SUCCESS) {
-                EAS_CloseFile(easdata, eashandle);
-                EAS_Shutdown(easdata);
-                return kOurScore;
-            }
-            EAS_Shutdown(easdata);
-        }
-
-        return 0.0;
-    }
-
-    virtual sp<MediaPlayerBase> createPlayer() {
-        ALOGV(" create MidiFile");
-        return new MidiFile();
+        return new NuPlayerDriver(pid);
     }
 };
 
@@ -360,7 +234,7 @@ class TestPlayerFactory : public MediaPlayerFactory::IFactory {
         return 0.0;
     }
 
-    virtual sp<MediaPlayerBase> createPlayer() {
+    virtual sp<MediaPlayerBase> createPlayer(pid_t /* pid */) {
         ALOGV("Create Test Player stub");
         return new TestPlayerStub();
     }
@@ -372,9 +246,7 @@ void MediaPlayerFactory::registerBuiltinFactories() {
     if (sInitComplete)
         return;
 
-    registerFactory_l(new StagefrightPlayerFactory(), STAGEFRIGHT_PLAYER);
     registerFactory_l(new NuPlayerFactory(), NU_PLAYER);
-    registerFactory_l(new SonivoxPlayerFactory(), SONIVOX_PLAYER);
     registerFactory_l(new TestPlayerFactory(), TEST_PLAYER);
 
     sInitComplete = true;

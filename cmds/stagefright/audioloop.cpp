@@ -14,23 +14,30 @@
  * limitations under the License.
  */
 
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
+#include <utils/String16.h>
+
 #include <binder/ProcessState.h>
 #include <media/mediarecorder.h>
 #include <media/stagefright/foundation/ADebug.h>
+#include <media/stagefright/foundation/AMessage.h>
 #include <media/stagefright/AMRWriter.h>
 #include <media/stagefright/AudioPlayer.h>
 #include <media/stagefright/AudioSource.h>
+#include <media/stagefright/MediaCodecSource.h>
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MetaData.h>
-#include <media/stagefright/OMXClient.h>
-#include <media/stagefright/OMXCodec.h>
+#include <media/stagefright/SimpleDecodingSource.h>
 #include "SineSource.h"
 
 using namespace android;
 
 static void usage(const char* name)
 {
-    fprintf(stderr, "Usage: %s [-d duration] [-m] [-w] [<output-file>]\n", name);
+    fprintf(stderr, "Usage: %s [-d du.ration] [-m] [-w] [<output-file>]\n", name);
     fprintf(stderr, "Encodes either a sine wave or microphone input to AMR format\n");
     fprintf(stderr, "    -d    duration in seconds, default 5 seconds\n");
     fprintf(stderr, "    -m    use microphone for input, default sine source\n");
@@ -73,14 +80,13 @@ int main(int argc, char* argv[])
     const int32_t kBitRate = outputWBAMR ? 16000 : 8000;
 
     android::ProcessState::self()->startThreadPool();
-    OMXClient client;
-    CHECK_EQ(client.connect(), (status_t)OK);
     sp<MediaSource> source;
 
     if (useMic) {
         // talk into the appropriate microphone for the duration
         source = new AudioSource(
                 AUDIO_SOURCE_MIC,
+                String16(),
                 kSampleRate,
                 channels);
     } else {
@@ -88,45 +94,49 @@ int main(int argc, char* argv[])
         source = new SineSource(kSampleRate, channels);
     }
 
-    sp<MetaData> meta = new MetaData;
-    meta->setCString(
-            kKeyMIMEType,
+    sp<AMessage> meta = new AMessage;
+    meta->setString(
+            "mime",
             outputWBAMR ? MEDIA_MIMETYPE_AUDIO_AMR_WB
                     : MEDIA_MIMETYPE_AUDIO_AMR_NB);
 
-    meta->setInt32(kKeyChannelCount, channels);
-    meta->setInt32(kKeySampleRate, kSampleRate);
-    meta->setInt32(kKeyBitRate, kBitRate);
+    meta->setInt32("channel-count", channels);
+    meta->setInt32("sample-rate", kSampleRate);
+    meta->setInt32("bitrate", kBitRate);
     int32_t maxInputSize;
     if (source->getFormat()->findInt32(kKeyMaxInputSize, &maxInputSize)) {
-        meta->setInt32(kKeyMaxInputSize, maxInputSize);
+        meta->setInt32("max-input-size", maxInputSize);
     }
 
-    sp<MediaSource> encoder = OMXCodec::Create(
-            client.interface(),
-            meta, true /* createEncoder */,
-            source);
+    sp<ALooper> looper = new ALooper;
+    looper->setName("audioloop");
+    looper->start();
+
+    sp<IMediaSource> encoder = MediaCodecSource::Create(looper, meta, source);
 
     if (fileOut != NULL) {
         // target file specified, write encoded AMR output
-        sp<AMRWriter> writer = new AMRWriter(fileOut);
+        int fd = open(fileOut, O_CREAT | O_LARGEFILE | O_TRUNC | O_RDWR, S_IRUSR | S_IWUSR);
+        if (fd < 0) {
+            return 1;
+        }
+        sp<AMRWriter> writer = new AMRWriter(fd);
+        close(fd);
         writer->addSource(encoder);
         writer->start();
         sleep(duration);
         writer->stop();
     } else {
         // otherwise decode to speaker
-        sp<MediaSource> decoder = OMXCodec::Create(
-                client.interface(),
-                meta, false /* createEncoder */,
-                encoder);
+        sp<IMediaSource> decoder = SimpleDecodingSource::Create(encoder);
 
         if (playToSpeaker) {
             AudioPlayer *player = new AudioPlayer(NULL);
             player->setSource(decoder);
             player->start();
             sleep(duration);
-            source->stop(); // must stop source otherwise delete player will hang
+
+            decoder.clear(); // must clear |decoder| otherwise delete player will hang.
             delete player; // there is no player->stop()...
         } else {
             CHECK_EQ(decoder->start(), (status_t)OK);

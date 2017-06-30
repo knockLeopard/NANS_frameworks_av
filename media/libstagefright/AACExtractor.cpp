@@ -174,7 +174,9 @@ AACExtractor::AACExtractor(
     if (mDataSource->getSize(&streamSize) == OK) {
          while (offset < streamSize) {
             if ((frameSize = getAdtsFrameLength(source, offset, NULL)) == 0) {
-                return;
+                ALOGW("prematured AAC stream (%lld vs %lld)",
+                        (long long)offset, (long long)streamSize);
+                break;
             }
 
             mOffsetVector.push(offset);
@@ -211,7 +213,7 @@ size_t AACExtractor::countTracks() {
     return mInitCheck == OK ? 1 : 0;
 }
 
-sp<MediaSource> AACExtractor::getTrack(size_t index) {
+sp<IMediaSource> AACExtractor::getTrack(size_t index) {
     if (mInitCheck != OK || index != 0) {
         return NULL;
     }
@@ -360,7 +362,7 @@ bool SniffAAC(
         pos += len;
 
         ALOGV("skipped ID3 tag, new starting offset is %lld (0x%016llx)",
-             pos, pos);
+                (long long)pos, (long long)pos);
     }
 
     uint8_t header[2];

@@ -12,7 +12,8 @@ LOCAL_SHARED_LIBRARIES :=       \
 LOCAL_MODULE:= libstagefright_yuv
 
 
-LOCAL_CFLAGS += -Werror
-
+LOCAL_CFLAGS += -Werror -Wall
+LOCAL_CLANG := true
+LOCAL_SANITIZE := signed-integer-overflow
 
 include $(BUILD_SHARED_LIBRARY)

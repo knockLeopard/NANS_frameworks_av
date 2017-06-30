@@ -100,7 +100,10 @@ static size_t getFrameSize(bool isWide, unsigned FT) {
 static status_t getFrameSizeByOffset(const sp<DataSource> &source,
         off64_t offset, bool isWide, size_t *frameSize) {
     uint8_t header;
-    if (source->readAt(offset, &header, 1) < 1) {
+    ssize_t count = source->readAt(offset, &header, 1);
+    if (count == 0) {
+        return ERROR_END_OF_STREAM;
+    } else if (count < 0) {
         return ERROR_IO;
     }
 
@@ -140,7 +143,10 @@ AMRExtractor::AMRExtractor(const sp<DataSource> &source)
 
     if (mDataSource->getSize(&streamSize) == OK) {
          while (offset < streamSize) {
-            if (getFrameSizeByOffset(source, offset, mIsWide, &frameSize) != OK) {
+             status_t status = getFrameSizeByOffset(source, offset, mIsWide, &frameSize);
+             if (status == ERROR_END_OF_STREAM) {
+                 break;
+             } else if (status != OK) {
                 return;
             }
 
@@ -180,7 +186,7 @@ size_t AMRExtractor::countTracks() {
     return mInitCheck == OK ? 1 : 0;
 }
 
-sp<MediaSource> AMRExtractor::getTrack(size_t index) {
+sp<IMediaSource> AMRExtractor::getTrack(size_t index) {
     if (mInitCheck != OK || index != 0) {
         return NULL;
     }
@@ -253,7 +259,7 @@ status_t AMRSource::read(
 
     int64_t seekTimeUs;
     ReadOptions::SeekMode mode;
-    if (options && options->getSeekTo(&seekTimeUs, &mode)) {
+    if (mOffsetTableLength > 0 && options && options->getSeekTo(&seekTimeUs, &mode)) {
         size_t size;
         int64_t seekFrame = seekTimeUs / 20000ll;  // 20ms per frame.
         mCurrentTimeUs = seekFrame * 20000ll;
@@ -309,7 +315,13 @@ status_t AMRSource::read(
         buffer->release();
         buffer = NULL;
 
-        return ERROR_IO;
+        if (n < 0) {
+            return ERROR_IO;
+        } else {
+            // only partial frame is available, treat it as EOS.
+            mOffset += n;
+            return ERROR_END_OF_STREAM;
+        }
     }
 
     buffer->set_range(0, frameSize);

@@ -27,6 +27,7 @@
 
 #include <cutils/log.h>
 #include "EffectBundle.h"
+#include "math.h"
 
 
 // effect_handle_t interface implementation for bass boost
@@ -721,17 +722,20 @@ int LvmBundle_process(LVM_INT16        *pIn,
 
     if (pContext->config.outputCfg.accessMode == EFFECT_BUFFER_ACCESS_WRITE){
         pOutTmp = pOut;
-    }else if (pContext->config.outputCfg.accessMode == EFFECT_BUFFER_ACCESS_ACCUMULATE){
+    } else if (pContext->config.outputCfg.accessMode == EFFECT_BUFFER_ACCESS_ACCUMULATE){
         if (pContext->pBundledContext->frameCount != frameCount) {
             if (pContext->pBundledContext->workBuffer != NULL) {
                 free(pContext->pBundledContext->workBuffer);
             }
             pContext->pBundledContext->workBuffer =
-                    (LVM_INT16 *)malloc(frameCount * sizeof(LVM_INT16) * 2);
+                    (LVM_INT16 *)calloc(frameCount, sizeof(LVM_INT16) * 2);
+            if (pContext->pBundledContext->workBuffer == NULL) {
+                return -ENOMEM;
+            }
             pContext->pBundledContext->frameCount = frameCount;
         }
         pOutTmp = pContext->pBundledContext->workBuffer;
-    }else{
+    } else {
         ALOGV("LVM_ERROR : LvmBundle_process invalid access mode");
         return -EINVAL;
     }
@@ -830,32 +834,69 @@ void LvmEffect_limitLevel(EffectContext *pContext) {
     int gainCorrection = 0;
     //Count the energy contribution per band for EQ and BassBoost only if they are active.
     float energyContribution = 0;
+    float energyCross = 0;
+    float energyBassBoost = 0;
+    float crossCorrection = 0;
 
     //EQ contribution
     if (pContext->pBundledContext->bEqualizerEnabled == LVM_TRUE) {
         for (int i = 0; i < FIVEBAND_NUMBANDS; i++) {
-            float bandEnergy = (pContext->pBundledContext->bandGaindB[i] *
-                    LimitLevel_bandEnergyContribution[i])/15.0;
+            float bandFactor = pContext->pBundledContext->bandGaindB[i]/15.0;
+            float bandCoefficient = LimitLevel_bandEnergyCoefficient[i];
+            float bandEnergy = bandFactor * bandCoefficient * bandCoefficient;
             if (bandEnergy > 0)
                 energyContribution += bandEnergy;
         }
+
+        //cross EQ coefficients
+        float bandFactorSum = 0;
+        for (int i = 0; i < FIVEBAND_NUMBANDS-1; i++) {
+            float bandFactor1 = pContext->pBundledContext->bandGaindB[i]/15.0;
+            float bandFactor2 = pContext->pBundledContext->bandGaindB[i+1]/15.0;
+
+            if (bandFactor1 > 0 && bandFactor2 > 0) {
+                float crossEnergy = bandFactor1 * bandFactor2 *
+                        LimitLevel_bandEnergyCrossCoefficient[i];
+                bandFactorSum += bandFactor1 * bandFactor2;
+
+                if (crossEnergy > 0)
+                    energyCross += crossEnergy;
+            }
+        }
+        bandFactorSum -= 1.0;
+        if (bandFactorSum > 0)
+            crossCorrection = bandFactorSum * 0.7;
     }
 
     //BassBoost contribution
     if (pContext->pBundledContext->bBassEnabled == LVM_TRUE) {
-        float bandEnergy = (pContext->pBundledContext->BassStrengthSaved *
-                LimitLevel_bassBoostEnergyContribution)/1000.0;
-        if (bandEnergy > 0)
-            energyContribution += bandEnergy;
+        float boostFactor = (pContext->pBundledContext->BassStrengthSaved)/1000.0;
+        float boostCoefficient = LimitLevel_bassBoostEnergyCoefficient;
+
+        energyContribution += boostFactor * boostCoefficient * boostCoefficient;
+
+        for (int i = 0; i < FIVEBAND_NUMBANDS; i++) {
+            float bandFactor = pContext->pBundledContext->bandGaindB[i]/15.0;
+            float bandCrossCoefficient = LimitLevel_bassBoostEnergyCrossCoefficient[i];
+            float bandEnergy = boostFactor * bandFactor *
+                    bandCrossCoefficient;
+            if (bandEnergy > 0)
+                energyBassBoost += bandEnergy;
+        }
     }
 
     //Virtualizer contribution
     if (pContext->pBundledContext->bVirtualizerEnabled == LVM_TRUE) {
-                   energyContribution += LimitLevel_virtualizerContribution;
-        }
+        energyContribution += LimitLevel_virtualizerContribution *
+                LimitLevel_virtualizerContribution;
+    }
+
+    double totalEnergyEstimation = sqrt(energyContribution + energyCross + energyBassBoost) -
+            crossCorrection;
+    ALOGV(" TOTAL energy estimation: %0.2f", totalEnergyEstimation);
 
     //roundoff
-    int maxLevelRound = (int)(energyContribution + 0.99);
+    int maxLevelRound = (int)(totalEnergyEstimation + 0.99);
     if (maxLevelRound + pContext->pBundledContext->volume > 0) {
         gainCorrection = maxLevelRound + pContext->pBundledContext->volume;
     }
@@ -1424,17 +1465,25 @@ int VirtualizerForceVirtualizationMode(EffectContext *pContext, audio_devices_t 
 //                            horizontal plane, +90 is directly above the user, -90 below
 //
 //----------------------------------------------------------------------------
-void VirtualizerGetSpeakerAngles(audio_channel_mask_t channelMask __unused,
+void VirtualizerGetSpeakerAngles(audio_channel_mask_t channelMask,
         audio_devices_t deviceType __unused, int32_t *pSpeakerAngles) {
     // the channel count is guaranteed to be 1 or 2
     // the device is guaranteed to be of type headphone
-    // this virtualizer is always 2in with speakers at -90 and 90deg of azimuth, 0deg of elevation
-    *pSpeakerAngles++ = (int32_t) AUDIO_CHANNEL_OUT_FRONT_LEFT;
-    *pSpeakerAngles++ = -90; // azimuth
-    *pSpeakerAngles++ = 0;   // elevation
-    *pSpeakerAngles++ = (int32_t) AUDIO_CHANNEL_OUT_FRONT_RIGHT;
-    *pSpeakerAngles++ = 90;  // azimuth
-    *pSpeakerAngles   = 0;   // elevation
+    // this virtualizer is always using 2 virtual speakers at -90 and 90deg of azimuth, 0deg of
+    // elevation but the return information is sized for nbChannels * 3, so we have to consider
+    // the (false here) case of a single channel, and return only 3 fields.
+    if (audio_channel_count_from_out_mask(channelMask) == 1) {
+        *pSpeakerAngles++ = (int32_t) AUDIO_CHANNEL_OUT_MONO; // same as FRONT_LEFT
+        *pSpeakerAngles++ = 0; // azimuth
+        *pSpeakerAngles = 0; // elevation
+    } else {
+        *pSpeakerAngles++ = (int32_t) AUDIO_CHANNEL_OUT_FRONT_LEFT;
+        *pSpeakerAngles++ = -90; // azimuth
+        *pSpeakerAngles++ = 0;   // elevation
+        *pSpeakerAngles++ = (int32_t) AUDIO_CHANNEL_OUT_FRONT_RIGHT;
+        *pSpeakerAngles++ = 90;  // azimuth
+        *pSpeakerAngles   = 0;   // elevation
+    }
 }
 
 //----------------------------------------------------------------------------
@@ -2316,8 +2365,12 @@ int Equalizer_getParameter(EffectContext     *pContext,
 
     case EQ_PARAM_BAND_LEVEL:
         param2 = *pParamTemp;
-        if (param2 >= FIVEBAND_NUMBANDS) {
+        if (param2 < 0 || param2 >= FIVEBAND_NUMBANDS) {
             status = -EINVAL;
+            if (param2 < 0) {
+                android_errorWriteLog(0x534e4554, "32438598");
+                ALOGW("\tERROR Equalizer_getParameter() EQ_PARAM_BAND_LEVEL band %d", param2);
+            }
             break;
         }
         *(int16_t *)pValue = (int16_t)EqualizerGetBandLevel(pContext, param2);
@@ -2327,8 +2380,12 @@ int Equalizer_getParameter(EffectContext     *pContext,
 
     case EQ_PARAM_CENTER_FREQ:
         param2 = *pParamTemp;
-        if (param2 >= FIVEBAND_NUMBANDS) {
+        if (param2 < 0 || param2 >= FIVEBAND_NUMBANDS) {
             status = -EINVAL;
+            if (param2 < 0) {
+                android_errorWriteLog(0x534e4554, "32436341");
+                ALOGW("\tERROR Equalizer_getParameter() EQ_PARAM_CENTER_FREQ band %d", param2);
+            }
             break;
         }
         *(int32_t *)pValue = EqualizerGetCentreFrequency(pContext, param2);
@@ -2338,8 +2395,12 @@ int Equalizer_getParameter(EffectContext     *pContext,
 
     case EQ_PARAM_BAND_FREQ_RANGE:
         param2 = *pParamTemp;
-        if (param2 >= FIVEBAND_NUMBANDS) {
+        if (param2 < 0 || param2 >= FIVEBAND_NUMBANDS) {
             status = -EINVAL;
+            if (param2 < 0) {
+                android_errorWriteLog(0x534e4554, "32247948");
+                ALOGW("\tERROR Equalizer_getParameter() EQ_PARAM_BAND_FREQ_RANGE band %d", param2);
+            }
             break;
         }
         EqualizerGetBandFreqRange(pContext, param2, (uint32_t *)pValue, ((uint32_t *)pValue + 1));
@@ -2366,9 +2427,13 @@ int Equalizer_getParameter(EffectContext     *pContext,
 
     case EQ_PARAM_GET_PRESET_NAME:
         param2 = *pParamTemp;
-        if (param2 >= EqualizerGetNumPresets()) {
-        //if (param2 >= 20) {     // AGO FIX
+        if ((param2 < 0 && param2 != PRESET_CUSTOM) ||  param2 >= EqualizerGetNumPresets()) {
             status = -EINVAL;
+            if (param2 < 0) {
+                android_errorWriteLog(0x534e4554, "32448258");
+                ALOGE("\tERROR Equalizer_getParameter() EQ_PARAM_GET_PRESET_NAME preset %d",
+                        param2);
+            }
             break;
         }
         name = (char *)pValue;
@@ -2438,8 +2503,12 @@ int Equalizer_setParameter (EffectContext *pContext, void *pParam, void *pValue)
         band =  *pParamTemp;
         level = (int32_t)(*(int16_t *)pValue);
         //ALOGV("\tEqualizer_setParameter() EQ_PARAM_BAND_LEVEL band %d, level %d", band, level);
-        if (band >= FIVEBAND_NUMBANDS) {
+        if (band < 0 || band >= FIVEBAND_NUMBANDS) {
             status = -EINVAL;
+            if (band < 0) {
+                android_errorWriteLog(0x534e4554, "32095626");
+                ALOGE("\tERROR Equalizer_setParameter() EQ_PARAM_BAND_LEVEL band %d", band);
+            }
             break;
         }
         EqualizerSetBandLevel(pContext, band, level);
@@ -2834,7 +2903,7 @@ int Effect_process(effect_handle_t     self,
     EffectContext * pContext = (EffectContext *) self;
     LVM_ReturnStatus_en     LvmStatus = LVM_SUCCESS;                /* Function call status */
     int    status = 0;
-    int    lvmStatus = 0;
+    int    processStatus = 0;
     LVM_INT16   *in  = (LVM_INT16 *)inBuffer->raw;
     LVM_INT16   *out = (LVM_INT16 *)outBuffer->raw;
 
@@ -2922,19 +2991,22 @@ int Effect_process(effect_handle_t     self,
         //pContext->pBundledContext->NumberEffectsEnabled,
         //pContext->pBundledContext->NumberEffectsCalled, pContext->EffectType);
 
-        if(status == -ENODATA){
+        if (status == -ENODATA){
             ALOGV("\tEffect_process() processing last frame");
         }
         pContext->pBundledContext->NumberEffectsCalled = 0;
         /* Process all the available frames, block processing is
            handled internalLY by the LVM bundle */
-        lvmStatus = android::LvmBundle_process(    (LVM_INT16 *)inBuffer->raw,
+        processStatus = android::LvmBundle_process(    (LVM_INT16 *)inBuffer->raw,
                                                 (LVM_INT16 *)outBuffer->raw,
                                                 outBuffer->frameCount,
                                                 pContext);
-        if(lvmStatus != LVM_SUCCESS){
-            ALOGV("\tLVM_ERROR : LvmBundle_process returned error %d", lvmStatus);
-            return lvmStatus;
+        if (processStatus != 0){
+            ALOGV("\tLVM_ERROR : LvmBundle_process returned error %d", processStatus);
+            if (status == 0) {
+                status = processStatus;
+            }
+            return status;
         }
     } else {
         //ALOGV("\tEffect_process Not Calling process with %d effects enabled, %d called: Effect %d",
@@ -3053,7 +3125,6 @@ int Effect_command(effect_handle_t  self,
             //ALOGV("\tEffect_command cmdCode Case: EFFECT_CMD_GET_PARAM start");
 
             effect_param_t *p = (effect_param_t *)pCmdData;
-
             if (pCmdData == NULL || cmdSize < sizeof(effect_param_t) ||
                     cmdSize < (sizeof(effect_param_t) + p->psize) ||
                     pReplyData == NULL || replySize == NULL ||
@@ -3061,13 +3132,32 @@ int Effect_command(effect_handle_t  self,
                 ALOGV("\tLVM_ERROR : EFFECT_CMD_GET_PARAM: ERROR");
                 return -EINVAL;
             }
+            if (EFFECT_PARAM_SIZE_MAX - sizeof(effect_param_t) < (size_t)p->psize) {
+                android_errorWriteLog(0x534e4554, "26347509");
+                ALOGV("\tLVM_ERROR : EFFECT_CMD_GET_PARAM: psize too big");
+                return -EINVAL;
+            }
+            uint32_t paddedParamSize = ((p->psize + sizeof(int32_t) - 1) / sizeof(int32_t)) *
+                    sizeof(int32_t);
+            if ((EFFECT_PARAM_SIZE_MAX - sizeof(effect_param_t) < paddedParamSize) ||
+                (EFFECT_PARAM_SIZE_MAX - sizeof(effect_param_t) - paddedParamSize <
+                    p->vsize)) {
+                ALOGV("\tLVM_ERROR : EFFECT_CMD_GET_PARAM: padded_psize or vsize too big");
+                return -EINVAL;
+            }
+            uint32_t expectedReplySize = sizeof(effect_param_t) + paddedParamSize + p->vsize;
+            if (*replySize < expectedReplySize) {
+                ALOGV("\tLVM_ERROR : EFFECT_CMD_GET_PARAM: min. replySize %u, got %u bytes",
+                        expectedReplySize, *replySize);
+                android_errorWriteLog(0x534e4554, "32705438");
+                return -EINVAL;
+            }
 
             memcpy(pReplyData, pCmdData, sizeof(effect_param_t) + p->psize);
 
             p = (effect_param_t *)pReplyData;
 
-            int voffset = ((p->psize - 1) / sizeof(int32_t) + 1) * sizeof(int32_t);
-
+            uint32_t voffset = paddedParamSize;
             if(pContext->EffectType == LVM_BASS_BOOST){
                 p->status = android::BassBoost_getParameter(pContext,
                                                             p->data,
