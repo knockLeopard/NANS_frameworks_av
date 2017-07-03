@@ -454,18 +454,13 @@ audio_devices_t Engine::getDeviceForStrategyInt(routing_strategy strategy,
     case STRATEGY_REROUTING:
     case STRATEGY_MEDIA: {
         uint32_t device2 = AUDIO_DEVICE_NONE;
-        if (strategy != STRATEGY_SONIFICATION) {
-            // no sonification on remote submix (e.g. WFD)
-            if (availableOutputDevices.getDevice(AUDIO_DEVICE_OUT_REMOTE_SUBMIX,
-                                                 String8("0")) != 0) {
-                device2 = availableOutputDevices.types() & AUDIO_DEVICE_OUT_REMOTE_SUBMIX;
-            }
-        }
-        if (isInCall() && (strategy == STRATEGY_MEDIA)) {
-            device = getDeviceForStrategyInt(
-                    STRATEGY_PHONE, availableOutputDevices, availableInputDevices, outputs);
-            break;
-        }
+
+	 /**
+                 * Date: Apr 7, 2016
+                 * Copyright (C) 2016 RUBIS Laboratory at Seoul National University
+                 *
+                 * BT has the highest priority, and Miracast is the second highest audio.
+                 */
         if ((device2 == AUDIO_DEVICE_NONE) &&
                 (mForceUse[AUDIO_POLICY_FORCE_FOR_MEDIA] != AUDIO_POLICY_FORCE_NO_BT_A2DP) &&
                 (outputs.getA2dpOutput() != 0)) {
@@ -477,6 +472,26 @@ audio_devices_t Engine::getDeviceForStrategyInt(routing_strategy strategy,
                 device2 = availableOutputDevicesType & AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_SPEAKER;
             }
         }
+        if (device2 == AUDIO_DEVICE_NONE && strategy != STRATEGY_SONIFICATION) {
+            // no sonification on remote submix (e.g. WFD)
+            device2 = availableOutputDevicesType & AUDIO_DEVICE_OUT_REMOTE_SUBMIX;
+        }
+                // END
+
+        
+        if (strategy != STRATEGY_SONIFICATION) {
+            // no sonification on remote submix (e.g. WFD)
+            if (availableOutputDevices.getDevice(AUDIO_DEVICE_OUT_REMOTE_SUBMIX,
+                                                 String8("0")) != 0) {
+                device2 = availableOutputDevices.types() & AUDIO_DEVICE_OUT_REMOTE_SUBMIX;
+            }
+        }
+        if (isInCall() && (strategy == STRATEGY_MEDIA)) {
+            device = getDeviceForStrategyInt(
+                    STRATEGY_PHONE, availableOutputDevices, availableInputDevices, outputs);
+            break;
+        }        
+
         if ((device2 == AUDIO_DEVICE_NONE) &&
             (mForceUse[AUDIO_POLICY_FORCE_FOR_MEDIA] == AUDIO_POLICY_FORCE_SPEAKER)) {
             device2 = availableOutputDevicesType & AUDIO_DEVICE_OUT_SPEAKER;
