@@ -454,13 +454,12 @@ audio_devices_t Engine::getDeviceForStrategyInt(routing_strategy strategy,
     case STRATEGY_REROUTING:
     case STRATEGY_MEDIA: {
         uint32_t device2 = AUDIO_DEVICE_NONE;
-
-	 /**
-                 * Date: Apr 7, 2016
-                 * Copyright (C) 2016 RUBIS Laboratory at Seoul National University
-                 *
-                 * BT has the highest priority, and Miracast is the second highest audio.
-                 */
+		/**
+        * Date: Jul 3, 2017
+        * Copyright (C) 2017 RUBIS Laboratory at Seoul National University
+		*
+        * BT has the highest priority, and Miracast is the second highest audio.
+        */
         if ((device2 == AUDIO_DEVICE_NONE) &&
                 (mForceUse[AUDIO_POLICY_FORCE_FOR_MEDIA] != AUDIO_POLICY_FORCE_NO_BT_A2DP) &&
                 (outputs.getA2dpOutput() != 0)) {
