@@ -454,12 +454,12 @@ audio_devices_t Engine::getDeviceForStrategyInt(routing_strategy strategy,
     case STRATEGY_REROUTING:
     case STRATEGY_MEDIA: {
         uint32_t device2 = AUDIO_DEVICE_NONE;
-		/*
-		 * Date: Jul 3, 2017
-		 * Copyright (C) 2017 RUBIS Laboratory at Seoul National University
-		 *
-		 * Bluetooth has the highest priority, and Miracast has the second highest priority.
-		 */
+        /*
+         * Date: Jul 3, 2017
+         * Copyright (C) 2017 RUBIS Laboratory at Seoul National University
+         *
+         * Bluetooth has the highest priority, and Miracast has the second highest priority.
+         */
         if ((device2 == AUDIO_DEVICE_NONE) &&
                 (mForceUse[AUDIO_POLICY_FORCE_FOR_MEDIA] != AUDIO_POLICY_FORCE_NO_BT_A2DP) &&
                 (outputs.getA2dpOutput() != 0)) {
@@ -475,7 +475,7 @@ audio_devices_t Engine::getDeviceForStrategyInt(routing_strategy strategy,
             // no sonification on remote submix (e.g. WFD)
             device2 = availableOutputDevicesType & AUDIO_DEVICE_OUT_REMOTE_SUBMIX;
         }
-		// END
+        // END
         
         if (strategy != STRATEGY_SONIFICATION) {
             // no sonification on remote submix (e.g. WFD)
