@@ -458,7 +458,7 @@ audio_devices_t Engine::getDeviceForStrategyInt(routing_strategy strategy,
 	 * Date: Jul 3, 2017
 	 * Copyright (C) 2017 RUBIS Laboratory at Seoul National University
 	 *
-	 * BT has the highest priority, and Miracast is the second highest audio.
+	 * Bluetooth has the highest priority, and Miracast has the second highest priority.
 	 */
         if ((device2 == AUDIO_DEVICE_NONE) &&
                 (mForceUse[AUDIO_POLICY_FORCE_FOR_MEDIA] != AUDIO_POLICY_FORCE_NO_BT_A2DP) &&
